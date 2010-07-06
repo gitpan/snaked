@@ -3,7 +3,9 @@ use strict;
 use ExtUtils::MakeMaker;
 
 WriteMakefile( NAME            => 'snaked',
-               VERSION_FROM    => 'lib/snaked.pm',
+               VERSION_FROM => 'snaked',
+#               VERSION    => '0.02',
+               ABSTRACT_FROM => 'snaked',
                EXE_FILES       => [ 'snaked' ],
                PREREQ_PM       => {
                    'Cwd'  => 0,
@@ -13,8 +15,5 @@ WriteMakefile( NAME            => 'snaked',
                    'Time::Local'  => 0,
                    'Proc::ProcessTable'  => 0,
                },
-               ABSTRACT_FROM => 'lib/snaked.pm',
                AUTHOR     => 'Petya Kohts <petya@kohts.ru>',
                );
-
-

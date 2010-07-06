@@ -3,9 +3,6 @@ package psSnake;
 use strict;
 use warnings;
 
-use vars qw($VERSION);
-$VERSION = '0.01';
-
 use POSIX;
 use utf8;
 use Data::Dumper;
@@ -508,18 +505,25 @@ sub open3_run {
     }
   }
 
-  waitpid($pid, 0);
+  my $waitpid_ret = waitpid($pid, 0);
+  my $real_exit = $?;
+  my $exit_value  = $real_exit >> 8;
 
   # since we've successfully reaped the child,
   # let our parent know about this.
   #
   if ($opts->{'parent_info'}) {
     my $ps = $opts->{'parent_info'};
+
+    # child was killed, inform parent
+    if ($real_exit & 127) {
+      print $ps "$pid killed with " . ($real_exit & 127) . "\n";
+      
+    }
+
     print $ps "reaped $pid\n";
   }
 
-  my $real_exit = $?;
-  my $exit_value  = $real_exit >> 8;
   if ($opts->{'parent_stdout'} || $opts->{'parent_stderr'}) {
     return $exit_value;
   }
@@ -602,6 +606,7 @@ sub run_forked {
     my $child_stderr = '';
     my $child_merged = '';
     my $child_exit_code = 0;
+    my $child_killed_by_signal = 0;
     my $parent_died = 0;
 
     my $got_sig_child = 0;
@@ -691,6 +696,10 @@ sub run_forked {
           $child_child_pid = undef;
           $l = $2;
         }
+        if ($l =~ /^[\d]+ killed with ([0-9]+?)\n(.*?)/so) {
+          $child_killed_by_signal = $1;
+          $l = $2;
+        }
       }
 
       while (my $l = <$child_stdout_socket>) {
@@ -763,6 +772,7 @@ sub run_forked {
       'timeout' => $child_timedout ? $opts->{'timeout'} : 0,
       'exit_code' => $child_exit_code,
       'parent_died' => $parent_died,
+      'killed_by_signal' => $child_killed_by_signal,
       'child_pgid' => $pid,
       };
 
@@ -781,6 +791,9 @@ sub run_forked {
     }
     if ($o->{'stderr'}) {
       $err_msg .= "stderr:\n" . $o->{'stderr'} . "\n";
+    }
+    if ($o->{'killed_by_signal'}) {
+      $err_msg .= "killed by signal [" . $o->{'killed_by_signal'} . "]\n";
     }
     $o->{'err_msg'} = $err_msg;
 
@@ -1511,9 +1524,3 @@ sub send_mail {
 
 
 1;
-
-__END__
-
-=head1 NAME
-
-snaked - cron as it should be.
