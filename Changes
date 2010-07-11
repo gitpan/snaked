@@ -1,4 +1,7 @@
 0.03
+  - correct dependency (Schedule::Cron::Events)
+
+0.03
   - using snaked namespace for module functions
 
 0.02
