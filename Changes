@@ -1,3 +1,6 @@
+0.03
+  - using snaked namespace for module functions
+
 0.02
   - added documentation
 

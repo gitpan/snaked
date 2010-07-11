@@ -64,9 +64,6 @@ BEGIN {
 use strict;
 use warnings;
 
-use vars qw($VERSION);
-$VERSION = '0.02';
-
 use lib "$ENV{'MY_LIB'}";
 use lib "$ENV{'PS_SNAKED_LIB'}";
 use snaked;
@@ -78,7 +75,7 @@ sub pgrp { my ($self) = @_; return $self->{'pgid'}; }
 sub pgid { my ($self) = @_; return $self->{'pgid'}; }
 sub cmndline { my ($self) = @_; return $self->{'cmd'}; }
 
-package psSnake::Daemon;
+package snaked::Daemon;
 use Storable;
 use Time::HiRes qw/usleep/;
 use Schedule::Cron::Events;
@@ -104,7 +101,7 @@ my $my_path;
 my $my_command_line;
 my $watchdogs2maintain = 1;
 
-$psSnake::Daemon::runtime = {
+$snaked::Daemon::runtime = {
   "type" => "master",
 
   "flags" => {
@@ -130,27 +127,27 @@ $psSnake::Daemon::runtime = {
   };
 
 sub sigTERM_handler {
-#  psSnake::do_log("snaked $$ term");
-  if ($psSnake::Daemon::runtime->{'type'} eq 'master') {
-    $psSnake::Daemon::runtime->{'flags'}->{'stop'} = 1;
+#  snaked::do_log("snaked $$ term");
+  if ($snaked::Daemon::runtime->{'type'} eq 'master') {
+    $snaked::Daemon::runtime->{'flags'}->{'stop'} = 1;
   }
-  elsif ($psSnake::Daemon::runtime->{'type'} eq 'watchdog') {
+  elsif ($snaked::Daemon::runtime->{'type'} eq 'watchdog') {
     exit;
   }
 }
 sub sigHUP_handler {
-  if ($psSnake::Daemon::runtime->{'type'} eq 'master') {
-    $psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 1;
-    $psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 0;
+  if ($snaked::Daemon::runtime->{'type'} eq 'master') {
+    $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 1;
+    $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 0;
   }
 }
 sub sigUSR1_handler {
 }
 sub sigUSR2_handler {
-  if ($psSnake::Daemon::runtime->{'type'} eq 'master') {
+  if ($snaked::Daemon::runtime->{'type'} eq 'master') {
     # do not restart if alreadying being stopped
-    if (!$psSnake::Daemon::runtime->{'flags'}->{'stop'}) {
-      $psSnake::Daemon::runtime->{'flags'}->{'restart'} = 1;
+    if (!$snaked::Daemon::runtime->{'flags'}->{'stop'}) {
+      $snaked::Daemon::runtime->{'flags'}->{'restart'} = 1;
     }
   }
 }
@@ -189,7 +186,7 @@ sub help() {
 sub config_value {
   my ($option_name) = @_;
 
-  my $config = $psSnake::Daemon::runtime->{'config'};
+  my $config = $snaked::Daemon::runtime->{'config'};
   if ($config->{$option_name}) {
     return $config->{$option_name}->{'value'};
   }
@@ -200,45 +197,45 @@ sub config_value {
 sub do_err_log {
   my ($msg) = @_;
 
-  my $config = $psSnake::Daemon::runtime->{'config'};
+  my $config = $snaked::Daemon::runtime->{'config'};
 
   if (config_value('log_errors')) {
-    my $tmp_log = $psSnake::LOG->{'filename'};
-    $psSnake::LOG->{'filename'} = config_value('log_errors');
+    my $tmp_log = $snaked::LOG->{'filename'};
+    $snaked::LOG->{'filename'} = config_value('log_errors');
     
     # just in case it fails
     my $res = eval {
-      psSnake::do_log($msg);
+      snaked::do_log($msg);
     };
 
-    $psSnake::LOG->{'filename'} = $tmp_log;
+    $snaked::LOG->{'filename'} = $tmp_log;
   }
 }
 
 sub run_task {
   my ($task_name) = @_;
   
-  my $task = $psSnake::Daemon::runtime->{'tasks'}->{$task_name};
+  my $task = $snaked::Daemon::runtime->{'tasks'}->{$task_name};
 
   my $old_job_name;
   $old_job_name = $ENV{'JOB_NAME'} if defined($ENV{'JOB_NAME'});
   $ENV{'JOB_NAME'} = $task_name;
 
-  psSnake::debug("running task [$task_name] timeout [$task->{'execution_timeout'}] kill timeout [$task->{'kill_timeout'}]");
-  my $o = psSnake::run_forked($task->{'cmd'}, {
+  snaked::debug("running task [$task_name] timeout [$task->{'execution_timeout'}] kill timeout [$task->{'kill_timeout'}]");
+  my $o = snaked::run_forked($task->{'cmd'}, {
     'timeout' => $task->{'execution_timeout'},
     'terminate_on_parent_sudden_death' => 1,
     'terminate_on_signal' => 'TERM',
     'terminate_wait_time' => $task->{'kill_timeout'},
     'clean_up_children' => 1,
     });
-  psSnake::debug("finished [$task_name]: " . psSnake::safe_string($o->{'exit_code'}));
+  snaked::debug("finished [$task_name]: " . snaked::safe_string($o->{'exit_code'}));
 
   $ENV{'JOB_NAME'} = $old_job_name if $old_job_name;
 
   if ($o->{'parent_died'}) {
     do_err_log("[$$] my parent died, exiting");
-    psSnake::do_log("[$$] my parent died, exiting");
+    snaked::do_log("[$$] my parent died, exiting");
     exit 1;
   }
   elsif ($o->{'err_msg'}) {
@@ -254,8 +251,8 @@ sub run_task {
       # (notify after each failure if not defined)
       if ($task->{'notification_interval'}) {
         if ($task->{'runtime'}->{'first_failure_time'} + $task->{'notification_interval'} < time()) {
-          psSnake::send_mail({
-            'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $psSnake::ADMIN_EMAIL),
+          snaked::send_mail({
+            'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $snaked::ADMIN_EMAIL),
             'subject' => $0 . ": $task_name warning",
             'body' => $o->{'err_msg'},
             'no_cc_all' => 1,
@@ -267,8 +264,8 @@ sub run_task {
         }
       }
       else {
-        psSnake::send_mail({
-          'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $psSnake::ADMIN_EMAIL),
+        snaked::send_mail({
+          'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $snaked::ADMIN_EMAIL),
           'subject' => $0 . ": $task_name warning",
           'body' => $o->{'err_msg'},
           'no_cc_all' => 1,
@@ -296,14 +293,14 @@ sub add_child {
 
   $opts = {} unless $opts;
 
-  psSnake::die ("Programmer error: add_child expects at least child type")
+  snaked::die ("Programmer error: add_child expects at least child type")
     unless $type;
 
   my $child_socket;
   my $parent_socket;
 
   socketpair($child_socket, $parent_socket, AF_UNIX, SOCK_STREAM, PF_UNSPEC) ||
-    psSnake::die ("socketpair: $!");
+    snaked::die ("socketpair: $!");
 
   $child_socket->autoflush(1);
   $parent_socket->autoflush(1);
@@ -329,15 +326,15 @@ sub add_child {
       'output' => '',
       };
 
-    $psSnake::Daemon::runtime->{'children'}->{'by_pid'}->{$pid} = $child;
-    $psSnake::Daemon::runtime->{'children'}->{'by_type'}->{$type}->{$pid} = $child;
+    $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid} = $child;
+    $snaked::Daemon::runtime->{'children'}->{'by_type'}->{$type}->{$pid} = $child;
 
     child_started($type);
   }
   else {
-    psSnake::die("cannot fork: $!") unless defined $pid;
+    snaked::die("cannot fork: $!") unless defined $pid;
 
-    $psSnake::Daemon::runtime->{'type'} = "child";
+    $snaked::Daemon::runtime->{'type'} = "child";
     close $child_socket;
 
     my $r = run_task($type);
@@ -357,18 +354,18 @@ sub add_child {
 sub get_child_cache {
   my ($name) = @_;
 
-  if (!defined($psSnake::Daemon::runtime->{'children_cache'}->{$name})) {
-    $psSnake::Daemon::runtime->{'children_cache'}->{$name} = {
+  if (!defined($snaked::Daemon::runtime->{'children_cache'}->{$name})) {
+    $snaked::Daemon::runtime->{'children_cache'}->{$name} = {
       'laststart' => 0
       };
   }
-  return $psSnake::Daemon::runtime->{'children_cache'}->{$name};
+  return $snaked::Daemon::runtime->{'children_cache'}->{$name};
 }
 
 sub find_child {
   my ($id, $type) = @_;
 
-  foreach my $v (values %{$psSnake::Daemon::runtime->{'children'}->{'by_pid'}}) {
+  foreach my $v (values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
     
     if ($id) {
       # search for child by its id (and type if specified)
@@ -393,16 +390,16 @@ sub find_child {
 
 sub child_started {
   my ($name) = @_;
-  $psSnake::Daemon::runtime->{'children_cache'}->{$name}->{'laststart'} = time();
+  $snaked::Daemon::runtime->{'children_cache'}->{$name}->{'laststart'} = time();
 }
 
 sub child_finished {
   my ($name, $output) = @_;
-  $psSnake::Daemon::runtime->{'children_cache'}->{$name}->{'lastfinish'} = time();
+  $snaked::Daemon::runtime->{'children_cache'}->{$name}->{'lastfinish'} = time();
 
   if ($output) {
     do_err_log("[$name]: $output");
-    psSnake::do_log("[$name]: $output");
+    snaked::do_log("[$name]: $output");
   }
 }
 
@@ -412,7 +409,7 @@ sub child_finished {
 sub manage_child {
   my ($pid) = @_;
 
-  my $child = $psSnake::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
+  my $child = $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
 
   my $child_socket = $child->{'child_socket'};
   my $child_output = "";
@@ -426,11 +423,11 @@ sub manage_child {
 sub remove_child {
   my ($pid) = @_;
 
-  psSnake::die("Programmer error: remove_child called on child which hasn't finished yet")
+  snaked::die("Programmer error: remove_child called on child which hasn't finished yet")
     if waitpid($pid,WNOHANG) ne -1;
 
-  my $child = $psSnake::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
-  my $task = $psSnake::Daemon::runtime->{'tasks'}->{$child->{'type'}};
+  my $child = $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
+  my $task = $snaked::Daemon::runtime->{'tasks'}->{$child->{'type'}};
 
   close($child->{'child_socket'});
 
@@ -444,7 +441,7 @@ sub remove_child {
     $task->{'runtime'}->{'first_failure_time'} = time()
       unless $task->{'runtime'}->{'first_failure_time'};
 
-    psSnake::debug("child output: " . $child->{'output'});
+    snaked::debug("child output: " . $child->{'output'});
 
     if (! defined($task->{'disable_notifications'})) {
       # reset failure interval counter,
@@ -463,15 +460,15 @@ sub remove_child {
   child_finished($child->{'type'}, $child->{'output'});
 
   my $child_group = find_group_by_task(undef, $child->{'type'});
-  delete $psSnake::Daemon::runtime->{'current_tasks'}->{$child_group}->{$child->{'type'}};
+  delete $snaked::Daemon::runtime->{'current_tasks'}->{$child_group}->{$child->{'type'}};
 
-  delete $psSnake::Daemon::runtime->{'children'}->{'by_type'}->{$child->{'type'}}->{$pid};
-  delete $psSnake::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
+  delete $snaked::Daemon::runtime->{'children'}->{'by_type'}->{$child->{'type'}}->{$pid};
+  delete $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
 }
 
 sub have_children {
   my $have_children = 0;
-  foreach my $k (keys %{$psSnake::Daemon::runtime->{'children'}->{'by_pid'}}) {
+  foreach my $k (keys %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
     $have_children = 1;
     last;
   }
@@ -482,9 +479,9 @@ sub for_each_child {
   my ($opts) = @_;
 
   $opts = {} unless $opts;
-  foreach my $k (keys %{$psSnake::Daemon::runtime->{'children'}->{'by_pid'}}) {
+  foreach my $k (keys %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
     if ($opts->{'stop_now'}) {
-#      psSnake::do_log("killing $k");
+#      snaked::do_log("killing $k");
       kill(15, $k); # TERM (default for run_forked)
     }
   }
@@ -492,7 +489,7 @@ sub for_each_child {
 
 sub find_group_by_task {
   my ($task_groups, $task_name) = @_;
-  $task_groups = $psSnake::Daemon::runtime->{'task_groups'} unless $task_groups;
+  $task_groups = $snaked::Daemon::runtime->{'task_groups'} unless $task_groups;
 
   foreach my $tg (keys %{$task_groups}) {
     if ($task_groups->{$tg}->{$task_name}) {
@@ -503,13 +500,13 @@ sub find_group_by_task {
   return undef;
 }
 
-# break $psSnake::Daemon::Runtime->{'tasks'}
+# break $snaked::Daemon::Runtime->{'tasks'}
 # (configured in /etc/ps-farm/options/ps-snaked/jobs)
 # into task groups by dependency
 #
 sub prepare_task_groups {
-  my $task_groups = $psSnake::Daemon::runtime->{'task_groups'};
-  my $tasks = $psSnake::Daemon::runtime->{'tasks'};
+  my $task_groups = $snaked::Daemon::runtime->{'task_groups'};
+  my $tasks = $snaked::Daemon::runtime->{'tasks'};
 
   foreach my $task_name (keys %{$tasks}) {
     my $task = $tasks->{$task_name};
@@ -612,18 +609,18 @@ sub refreshOptions {
   
   $opts = {} unless $opts;
 
-  my $config = $psSnake::Daemon::runtime->{'config'};
-  my $tasks = Storable::dclone($psSnake::Daemon::runtime->{'tasks'});
+  my $config = $snaked::Daemon::runtime->{'config'};
+  my $tasks = Storable::dclone($snaked::Daemon::runtime->{'tasks'});
   my $tmp;
 
   # read daemon options
   my $new_options = {};
 
-  $tmp = psSnake::read_dir($dir, {'output_type' => 'arrayref', 'only-files' => 1});
+  $tmp = snaked::read_dir($dir, {'output_type' => 'arrayref', 'only-files' => 1});
   foreach my $o (@{$tmp}) {
     next if $o =~ /^\./o;
 
-    my $fileinfo = psSnake::fileinfo_struct({'absolute_name' => $dir . "/" . $o});
+    my $fileinfo = snaked::fileinfo_struct({'absolute_name' => $dir . "/" . $o});
 
     $new_options->{$o} = 1;
 
@@ -635,14 +632,14 @@ sub refreshOptions {
     my $option_updated = ($config->{$o} ? 1 : 0);
 
     $config->{$o}->{'mtime'} = $fileinfo->{'mtime'};
-    $config->{$o}->{'value'} = psSnake::read_file_option($dir . "/" . $o);
+    $config->{$o}->{'value'} = snaked::read_file_option($dir . "/" . $o);
 
     if ($option_updated) {
-      psSnake::do_log("new value for option $o: " . $config->{$o}->{'value'});
+      snaked::do_log("new value for option $o: " . $config->{$o}->{'value'});
     }
 
     if ($o eq "admin_email") {
-      $psSnake::ADMIN_EMAIL = $config->{$o}->{'value'};
+      $snaked::ADMIN_EMAIL = $config->{$o}->{'value'};
     }
   }
 
@@ -651,37 +648,37 @@ sub refreshOptions {
     next if $new_options->{$opt_name};
     
     delete ($config->{$opt_name});
-    psSnake::do_log("option $opt_name removed");
+    snaked::do_log("option $opt_name removed");
   }
 
-  if (!$psSnake::ADMIN_EMAIL) {
-    $psSnake::ADMIN_EMAIL = 'root';
+  if (!$snaked::ADMIN_EMAIL) {
+    $snaked::ADMIN_EMAIL = 'root';
   }
 
   # configure logging (defaults to /tmp/ps-snaked.log, three 10MB files, rotated)
   #
   if ($config->{'log'}) {
-    $psSnake::LOG = {
+    $snaked::LOG = {
       'filename' => $config->{'log'}->{'value'},
       };
   }
   else {
-    $psSnake::LOG = {
+    $snaked::LOG = {
       'filename' => ($ENV{'MY_ROOT'} eq "/" ? "" : $ENV{'MY_ROOT'}) . "/tmp/snaked.log",
       };
   }
   
   if ($config->{'log_rotate_size'}) {
-    $psSnake::LOG->{'rotate_size'} = $config->{'log_rotate_size'}->{'value'};
+    $snaked::LOG->{'rotate_size'} = $config->{'log_rotate_size'}->{'value'};
   }
   else {
-    $psSnake::LOG->{'rotate_size'} = 1024 * 1024 * 10;
+    $snaked::LOG->{'rotate_size'} = 1024 * 1024 * 10;
   }
   if ($config->{'log_rotate_keep_copies'}) {
-    $psSnake::LOG->{'rotate_keep_copies'} = $config->{'log_rotate_keep_copies'}->{'value'};
+    $snaked::LOG->{'rotate_keep_copies'} = $config->{'log_rotate_keep_copies'}->{'value'};
   }
   else {
-    $psSnake::LOG->{'rotate_keep_copies'} = 2;
+    $snaked::LOG->{'rotate_keep_copies'} = 2;
   }
 
   # in watchdog mode we don't need
@@ -692,13 +689,13 @@ sub refreshOptions {
   my $defined_jobs = {};
 
   # read daemon jobs
-  $tmp = psSnake::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
+  $tmp = snaked::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
   foreach my $o (@{$tmp}) {
     next if $o =~ /^\./o;
 
     $defined_jobs->{$o} = 1;
 
-    my $dirinfo = psSnake::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
+    my $dirinfo = snaked::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
 
     # job was not modified since we've read it
     if ($tasks->{$o} && $tasks->{$o}->{'mtime'} eq $dirinfo->{'mtime'}) {
@@ -706,21 +703,21 @@ sub refreshOptions {
     }
 
     if ($tasks->{$o}) {
-      psSnake::do_log("reread job [$o] from disk");
+      snaked::do_log("reread job [$o] from disk");
     }
 
     $tasks->{$o}->{'mtime'} = $dirinfo->{'mtime'};
 
-    my $joptions = psSnake::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
+    my $joptions = snaked::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
     foreach my $jo (@{$joptions}) {
       if ($jo eq 'conflicts') {
-        $tasks->{$o}->{$jo} = psSnake::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
+        $tasks->{$o}->{$jo} = snaked::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
       }
       elsif ($jo eq 'cmd') {
         $tasks->{$o}->{$jo} = $dir . "/jobs/" . $o . "/" . $jo;
       }
       else {
-        $tasks->{$o}->{$jo} = psSnake::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
+        $tasks->{$o}->{$jo} = snaked::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
       }
     }
     if (defined($tasks->{$o}->{'disabled'}) && !$opts->{'keep_disabled'}) {
@@ -731,7 +728,7 @@ sub refreshOptions {
   # cleanup removed jobs, validate tasks
   TASKS: foreach my $task_name (keys %{$tasks}) {
     if (!$defined_jobs->{$task_name}) {
-      psSnake::do_log("job [$task_name] removed");
+      snaked::do_log("job [$task_name] removed");
       delete($tasks->{$task_name});
       next TASKS;
     }
@@ -748,13 +745,13 @@ sub refreshOptions {
 
     foreach my $mp ("cmd") {
       if (!$task->{$mp}) {
-        psSnake::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
+        snaked::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
         delete($tasks->{$task_name});
         next TASKS;
       }
     }
     if (! -x $task->{'cmd'}) {
-      psSnake::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
+      snaked::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
       delete($tasks->{$task_name});
       next TASKS;
     }
@@ -762,7 +759,7 @@ sub refreshOptions {
     if ((!$task->{'execution_interval'} && !$task->{'execution_schedule'}) ||
       ($task->{'execution_interval'} && $task->{'execution_schedule'})) {
       
-      psSnake::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
+      snaked::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
       delete($tasks->{$task_name});
       next TASKS;
     }
@@ -781,7 +778,7 @@ sub refreshOptions {
         $msg =~ s/at\ \/.+$//sgo;
         $msg = ": $msg" if $msg;
 
-        psSnake::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
+        snaked::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
         delete($tasks->{$task_name});
         next TASKS;
       }
@@ -790,22 +787,22 @@ sub refreshOptions {
     }
 
     foreach my $dp ("execution_interval", "execution_timeout", "notification_interval", "start_random_sleep") {
-      if ($task->{$dp} && !psSnake::is_digital($task->{$dp})) {
-        psSnake::do_log("skipping job [$task_name]: [$dp] must be numeric");
+      if ($task->{$dp} && !snaked::is_digital($task->{$dp})) {
+        snaked::do_log("skipping job [$task_name]: [$dp] must be numeric");
         delete($tasks->{$task_name});
         next TASKS;
       }
     }
 
     if ($task->{'conflicts'} && ref($task->{'conflicts'}) ne 'ARRAY') {
-      psSnake::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
+      snaked::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
       delete($tasks->{$task_name});
       next TASKS;
     }
     if ($task->{'conflicts'}) {
       foreach my $c_task (@{$task->{'conflicts'}}) {
         if ($c_task eq $task_name) {
-          psSnake::do_log("skipping job [$task_name]: task conflicts with itself.");
+          snaked::do_log("skipping job [$task_name]: task conflicts with itself.");
           delete($tasks->{$task_name});
           next TASKS;
         }
@@ -814,8 +811,8 @@ sub refreshOptions {
   }
 
   # apply new tasks, recalculate task groups
-  $psSnake::Daemon::runtime->{'tasks'} = $tasks;
-  $psSnake::Daemon::runtime->{'task_groups'} = {};
+  $snaked::Daemon::runtime->{'tasks'} = $tasks;
+  $snaked::Daemon::runtime->{'task_groups'} = {};
   prepare_task_groups();
 }
 
@@ -870,7 +867,7 @@ sub get_process_table {
       $i++;
     }
     if (!$open_res) {
-      psSnake::die("unable to read /proc");
+      snaked::die("unable to read /proc");
     }
 
     my @all_entries;
@@ -884,7 +881,7 @@ sub get_process_table {
 
     # . + .. eq 2
     if (scalar(@all_entries) < 3) {
-      psSnake::die("/proc is not mounted");
+      snaked::die("/proc is not mounted");
     }
 
     my $read_may_fail = sub {
@@ -946,7 +943,7 @@ sub get_process_table {
     my $r = code_may_fail(sub {return Proc::ProcessTable->new()->table}, {'tries' => 3});
 
     if (!$r->{'result'}) {
-      psSnake::die("unable to get process table: " . $r->{'warn'});
+      snaked::die("unable to get process table: " . $r->{'warn'});
     }
     
     $ptable = $r->{'result'};
@@ -960,7 +957,7 @@ sub get_process_table {
   }
 
   if (scalar(@{$ptable}) < 2) {
-    psSnake::die("unable to read process table");
+    snaked::die("unable to read process table");
   }
 
   return $ptable;
@@ -976,10 +973,10 @@ sub get_process_by_id {
     $processes = $opts->{'processes'};
   }
   else {
-    if (!$psSnake::Daemon::runtime->{'startup_processes'}) {
-      $psSnake::Daemon::runtime->{'startup_processes'} = get_process_table();
+    if (!$snaked::Daemon::runtime->{'startup_processes'}) {
+      $snaked::Daemon::runtime->{'startup_processes'} = get_process_table();
     }
-    $processes = $psSnake::Daemon::runtime->{'startup_processes'};
+    $processes = $snaked::Daemon::runtime->{'startup_processes'};
   }
 
   foreach my $p (@$processes) {
@@ -1017,7 +1014,7 @@ sub get_my_process {
     my $pid_p = get_process_by_id($pid);
 
     if (!$pid_p) {
-      psSnake::die("unable to find [$pid] in process list");
+      snaked::die("unable to find [$pid] in process list");
     }
 
     if ($pid_p->cmndline &&
@@ -1035,7 +1032,7 @@ sub get_my_process {
   while ($pid ne 1) {
     my $pid_p = get_process_by_id($pid);
     if (!$pid_p) {
-      psSnake::die("unable to find [$pid] in process list");
+      snaked::die("unable to find [$pid] in process list");
     }
 
     if ($pid_p->cmndline && $pid_p->cmndline =~ /$daemon_match_nocfg/ && $pid_p->cmndline !~ /--cfg/) {
@@ -1055,10 +1052,10 @@ sub get_other_daemon_process {
   $opts = {} unless $opts;
 
   my $processes;
-  if (!$psSnake::Daemon::runtime->{'startup_processes'} || $opts->{'refresh_startup_processes'}) {
-    $psSnake::Daemon::runtime->{'startup_processes'} = get_process_table();
+  if (!$snaked::Daemon::runtime->{'startup_processes'} || $opts->{'refresh_startup_processes'}) {
+    $snaked::Daemon::runtime->{'startup_processes'} = get_process_table();
   }
-  $processes = $psSnake::Daemon::runtime->{'startup_processes'};
+  $processes = $snaked::Daemon::runtime->{'startup_processes'};
 
   # this doesn't mean "always find my process",
   # name of the sub is not consistent!!!
@@ -1182,11 +1179,11 @@ sub get_my_path_commandline {
   my $my_command_line;
 
   my $me = get_process_by_id($$, $opts);
-  psSnake::die("[$$]: unable to find myself in process list") unless $me;
+  snaked::die("[$$]: unable to find myself in process list") unless $me;
   $my_path = $FindBin::Bin;
-  psSnake::die("[$$]: unable to find my path") unless $my_path;
+  snaked::die("[$$]: unable to find my path") unless $my_path;
   $my_command_line = $me->cmndline;
-  psSnake::die("[$$] unable to determine my command line") unless $my_command_line;
+  snaked::die("[$$] unable to determine my command line") unless $my_command_line;
 
   return ($my_path, $my_command_line);
 }
@@ -1217,12 +1214,12 @@ sub exec_ps_snaked {
     exit 0;
   }
   else {
-    POSIX::setsid() || psSnake::die("Error running setsid: " . $!);
+    POSIX::setsid() || snaked::die("Error running setsid: " . $!);
 
     # let parent exit and clean up from /proc (or whatever)
     sleep 1;
 
-    POSIX::setsid() || psSnake::do_log("Error running setsid: " . $!, {'stderr' => 1}) && die();
+    POSIX::setsid() || snaked::do_log("Error running setsid: " . $!, {'stderr' => 1}) && die();
     
     $my_command_line = canonical_command_line($my_command_line, $my_path);
 
@@ -1253,7 +1250,7 @@ sub exec_ps_snaked {
     $ENV{'snaked_cleanup_already_running'} = 1;
 
     # next life
-    exec($my_command_line) || psSnake::do_log("[$$] unable to exec $my_command_line", {'stderr' => 1}) && die();
+    exec($my_command_line) || snaked::do_log("[$$] unable to exec $my_command_line", {'stderr' => 1}) && die();
   }
   exit(255);
 }
@@ -1275,7 +1272,7 @@ sub manage_watchdogs {
     my $t_cmdline = $my_command_line;
     $t_cmdline = canonical_command_line($t_cmdline, $my_path);
     $t_cmdline =~ s/\-\-daemon/\-\-watchdog/;
-    psSnake::run_forked($t_cmdline);
+    snaked::run_forked($t_cmdline);
   }
 }
 
@@ -1297,7 +1294,7 @@ sub stop_watchdogs {
 sub run_watchdog {
 
   # set daemon type to change signal handling slightly
-  $psSnake::Daemon::runtime->{'type'} = 'watchdog';
+  $snaked::Daemon::runtime->{'type'} = 'watchdog';
 
   my $unsuccessful_tries = 0;
   my $life_time = 3600 * (rand($watchdogs2maintain) + 1);
@@ -1310,11 +1307,11 @@ sub run_watchdog {
     # 
     # watchdogs are restarted by main daemon.
     # 
-    if ((time() - $psSnake::Daemon::runtime->{'start_time'}) > $life_time && !$unsuccessful_tries) {
+    if ((time() - $snaked::Daemon::runtime->{'start_time'}) > $life_time && !$unsuccessful_tries) {
       exit(0);
     }
 
-    if ($psSnake::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
+    if ($snaked::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
       my $ptable = get_process_table();
 
       my $currently_running_watchdogs = 0;
@@ -1373,7 +1370,7 @@ sub run_watchdog {
           sleep(4 + 4 * int(rand($currently_running_watchdogs)));
         }
         else {
-          psSnake::do_log("watchdog [$$]: snaked not found (killed?), respawning");
+          snaked::do_log("watchdog [$$]: snaked not found (killed?), respawning");
           # replace --watchdog with --daemon
           my $t_cmdline = $my_command_line;
           $t_cmdline =~ s/\-\-watchdog/\-\-daemon/;
@@ -1410,18 +1407,18 @@ sub run_watchdog {
         }
       }
 
-      $psSnake::Daemon::runtime->{'usec_2check_watchdog'} = ($watchdogs2maintain + 1) * 2 * 2000000;
+      $snaked::Daemon::runtime->{'usec_2check_watchdog'} = ($watchdogs2maintain + 1) * 2 * 2000000;
     }
 
     usleep(50000);
-    $psSnake::Daemon::runtime->{'usec_2check_watchdog'} = $psSnake::Daemon::runtime->{'usec_2check_watchdog'} - 50000;
+    $snaked::Daemon::runtime->{'usec_2check_watchdog'} = $snaked::Daemon::runtime->{'usec_2check_watchdog'} - 50000;
   }
   exit (255);
 }
 
-psSnake::read_cmdline();
+snaked::read_cmdline();
 
-if (defined($psSnake::cmd_opts->{'stop'})) {
+if (defined($snaked::cmd_opts->{'stop'})) {
   my $d = get_other_daemon_process();
   if ($d) {
     print "requesting " . $d->pid() . " [" . $d->cmndline . "] to stop\n";
@@ -1432,7 +1429,7 @@ if (defined($psSnake::cmd_opts->{'stop'})) {
   }
   exit 0;
 }
-elsif (defined($psSnake::cmd_opts->{'configure'})) {
+elsif (defined($snaked::cmd_opts->{'configure'})) {
   my $d = get_other_daemon_process();
   if ($d) {
     print "requesting " . $d->pid() . " [" . $d->cmndline . "] to refresh configuration\n";
@@ -1443,10 +1440,10 @@ elsif (defined($psSnake::cmd_opts->{'configure'})) {
   }
   exit 0;
 }
-elsif (defined($psSnake::cmd_opts->{'restart'})) {
+elsif (defined($snaked::cmd_opts->{'restart'})) {
   my $d = get_other_daemon_process();
   if ($d) {
-    if (!defined($psSnake::cmd_opts->{'only-errors'})) {
+    if (!defined($snaked::cmd_opts->{'only-errors'})) {
       print "requesting " . $d->pid() . " [" . $d->cmndline . "] to restart\n";
     }
     kill ("USR2", $d->pid)
@@ -1456,7 +1453,7 @@ elsif (defined($psSnake::cmd_opts->{'restart'})) {
   }
   exit 0;
 }
-elsif (defined($psSnake::cmd_opts->{'status'})) {
+elsif (defined($snaked::cmd_opts->{'status'})) {
   my $d = get_other_daemon_process();
   if ($d) {
     print "snaked is running as pid " . $d->pid . ". command line [" . $d->cmndline . "]\n";
@@ -1466,17 +1463,17 @@ elsif (defined($psSnake::cmd_opts->{'status'})) {
   }
   exit 0;
 }
-elsif (defined($psSnake::cmd_opts->{'show-jobs'})) {
+elsif (defined($snaked::cmd_opts->{'show-jobs'})) {
   refreshOptions($ENV{'PS_SNAKED_CFG'}, {'keep_disabled' => 1});
   print "    global options\n";
-  foreach my $k (sort keys %{$psSnake::Daemon::runtime->{'config'}}) {
-    print "      $k: " . $psSnake::Daemon::runtime->{'config'}->{$k}->{'value'} . "\n";
+  foreach my $k (sort keys %{$snaked::Daemon::runtime->{'config'}}) {
+    print "      $k: " . $snaked::Daemon::runtime->{'config'}->{$k}->{'value'} . "\n";
   }
 
   print "    configured jobs:\n";
-  foreach my $job_name (sort keys %{$psSnake::Daemon::runtime->{'tasks'}}) {
+  foreach my $job_name (sort keys %{$snaked::Daemon::runtime->{'tasks'}}) {
     print "      " . $job_name . "\n";
-    my $job = $psSnake::Daemon::runtime->{'tasks'}->{$job_name};
+    my $job = $snaked::Daemon::runtime->{'tasks'}->{$job_name};
     foreach my $o (sort keys %{$job}) {
       print "        $o: ";
       if (ref($job->{$o}) eq 'ARRAY') {
@@ -1490,28 +1487,28 @@ elsif (defined($psSnake::cmd_opts->{'show-jobs'})) {
   }
   exit 0;
 }
-elsif (defined($psSnake::cmd_opts->{'version'})) {
+elsif (defined($snaked::cmd_opts->{'version'})) {
   print "$version\n";
   exit 0;
 }
 
-my $i_am_watchdog = defined($psSnake::cmd_opts->{'watchdog'});
+my $i_am_watchdog = defined($snaked::cmd_opts->{'watchdog'});
 
-if (!defined($psSnake::cmd_opts->{'daemon'}) && !$psSnake::debug && !$i_am_watchdog) {
+if (!defined($snaked::cmd_opts->{'daemon'}) && !$snaked::debug && !$i_am_watchdog) {
   help();
   exit 0;
 }
 
 refreshOptions($ENV{'PS_SNAKED_CFG'}, {'no-jobs' => $i_am_watchdog});
-my $t = $psSnake::LOG->{'filename'};
-if (!psSnake::can_log()) {
-  psSnake::warn("Can not write to log file [$t], check permissions; logging to STDERR");
+my $t = $snaked::LOG->{'filename'};
+if (!snaked::can_log()) {
+  snaked::warn("Can not write to log file [$t], check permissions; logging to STDERR");
 }
 if (config_value('log_errors')) {
-  if (!psSnake::can_write(config_value('log_errors'))) {
-    psSnake::warn("Can not write to log_errors file [" . config_value('log_errors') .
+  if (!snaked::can_write(config_value('log_errors'))) {
+    snaked::warn("Can not write to log_errors file [" . config_value('log_errors') .
       "], check permissions.");
-    delete($psSnake::Daemon::runtime->{'config'}->{'log_errors'});
+    delete($snaked::Daemon::runtime->{'config'}->{'log_errors'});
   }
 }
 
@@ -1519,7 +1516,7 @@ if (!$i_am_watchdog) {
   my $d = get_other_daemon_process();
   if ($d) {
     if (!$ENV{'snaked_cleanup_already_running'}) {
-      psSnake::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "]");
+      snaked::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "]");
       exit 1;
     }
     else {
@@ -1529,11 +1526,11 @@ if (!$i_am_watchdog) {
       sleep 3;
       $d = get_other_daemon_process({'refresh_startup_processes' => 1});
       if ($d) {
-        psSnake::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "] and doesn't stop on KILL signal");
+        snaked::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "] and doesn't stop on KILL signal");
         exit 1;
       }
       else {
-        psSnake::warn("[$$] killed previously running snaked: " . $previous_snaked->cmndline . " ["  . $previous_snaked->pid . "], continuing to start");
+        snaked::warn("[$$] killed previously running snaked: " . $previous_snaked->cmndline . " ["  . $previous_snaked->pid . "], continuing to start");
       }
     }
   }
@@ -1541,13 +1538,13 @@ if (!$i_am_watchdog) {
 
 ($my_path, $my_command_line) = get_my_path_commandline();
 
-psSnake::debug("my_path: $my_path");
-psSnake::debug("my_command_line: $my_command_line");
+snaked::debug("my_path: $my_path");
+snaked::debug("my_command_line: $my_command_line");
 
 print "starting snaked daemon for $ENV{'PS_SNAKED_CFG'}\n"
   unless $i_am_watchdog;
 
-if (defined($psSnake::cmd_opts->{'daemon'}) || $i_am_watchdog) {
+if (defined($snaked::cmd_opts->{'daemon'}) || $i_am_watchdog) {
   # restart daemon using its full pathname and config path
   # if it was not started like this (so we could distinguish
   # between daemons by their locations)
@@ -1566,30 +1563,30 @@ if (defined($psSnake::cmd_opts->{'daemon'}) || $i_am_watchdog) {
 
   # run watchdog (except for when snaked
   # would be restarted right after start)
-  if ($i_am_watchdog && !$psSnake::Daemon::runtime->{'flags'}->{'restart'}) {
+  if ($i_am_watchdog && !$snaked::Daemon::runtime->{'flags'}->{'restart'}) {
     run_watchdog();
     exit;
   }
 }
-elsif ($psSnake::debug) {
+elsif ($snaked::debug) {
   # stay in foreground
 }
 
-psSnake::do_log("[$$] started");
+snaked::do_log("[$$] started");
 
-if ($psSnake::Daemon::runtime->{'config'}->{'pidfile'} &&
-  !$psSnake::Daemon::runtime->{'flags'}->{'restart'} &&
+if ($snaked::Daemon::runtime->{'config'}->{'pidfile'} &&
+  !$snaked::Daemon::runtime->{'flags'}->{'restart'} &&
   !$i_am_watchdog) {
 
-  if (psSnake::can_write($psSnake::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})) {
-    psSnake::write_file_option($psSnake::Daemon::runtime->{'config'}->{'pidfile'}->{'value'}, $$);
+  if (snaked::can_write($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})) {
+    snaked::write_file_option($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'}, $$);
   }
 }
 
 my $previous_now;
 my $current_now;
 
-my $max_job_time = int(config_value('max_job_time'));
+my $max_job_time = config_value('max_job_time');
 $max_job_time = 3600 * 2 unless $max_job_time;
 
 while (1) {
@@ -1598,22 +1595,22 @@ while (1) {
 
   # clock moved back -- restarting
   if ($previous_now && $current_now && ($previous_now > $current_now)) {
-    psSnake::do_log("clock moved back from " . localtime($previous_now) . " to " . localtime($current_now) . ", restarting");
+    snaked::do_log("clock moved back from " . localtime($previous_now) . " to " . localtime($current_now) . ", restarting");
     sigUSR2_handler();
   }
 
-  if (!$psSnake::Daemon::runtime->{'flags'}->{'restart'}) {
-    if ($psSnake::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
+  if (!$snaked::Daemon::runtime->{'flags'}->{'restart'}) {
+    if ($snaked::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
       manage_watchdogs() if $watchdogs2maintain;
-      $psSnake::Daemon::runtime->{'usec_2check_watchdog'} = ($watchdogs2maintain + 1) * 2 * 2000000;
+      $snaked::Daemon::runtime->{'usec_2check_watchdog'} = ($watchdogs2maintain + 1) * 2 * 2000000;
     }
   }
 
-  my $have_active_children = values %{$psSnake::Daemon::runtime->{'children'}->{'by_pid'}};
-  psSnake::debug("active children:") if $have_active_children;
+  my $have_active_children = values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}};
+  snaked::debug("active children:") if $have_active_children;
 
   # check status of all children removing those which finished
-  foreach my $v (values %{$psSnake::Daemon::runtime->{'children'}->{'by_pid'}}) {
+  foreach my $v (values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
     
     # minimize time() call a bit
     my $now = time();
@@ -1635,13 +1632,13 @@ while (1) {
 
       do_err_log("killed long running (". ($now - $v->{'borntime'}) .
         " seconds) process [$v->{'pid'}] [$v->{'type'}]", {"stderr" => 1});
-      psSnake::do_log("killed long running (". ($now - $v->{'borntime'}) .
+      snaked::do_log("killed long running (". ($now - $v->{'borntime'}) .
         " seconds) process [$v->{'pid'}] [$v->{'type'}]", {"stderr" => 1});
     }
 
     my $waitpid = waitpid($v->{'pid'}, WNOHANG);
     
-    psSnake::debug("\tchild [$v->{'pid'}] [$v->{'type'}] [" . ($v->{'id'} ? $v->{'id'} : "") . "]: $waitpid;".
+    snaked::debug("\tchild [$v->{'pid'}] [$v->{'type'}] [" . ($v->{'id'} ? $v->{'id'} : "") . "]: $waitpid;".
       " running " . (time() - $v->{'borntime'}) . " seconds");
 
     manage_child($v->{'pid'});
@@ -1651,49 +1648,49 @@ while (1) {
     }
   }
 
-  if ($psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration'} ||
-    $psSnake::Daemon::runtime->{'usec_2refresh_configuration'} < 1) {
+  if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} ||
+    $snaked::Daemon::runtime->{'usec_2refresh_configuration'} < 1) {
     if (!have_children()) {
-      if ($psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration'}) {
-        psSnake::do_log("requested to reread configuration, rereading");
+      if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'}) {
+        snaked::do_log("requested to reread configuration, rereading");
       }
       refreshOptions($ENV{'PS_SNAKED_CFG'});
-      $psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 0;
-      $psSnake::Daemon::runtime->{'usec_2refresh_configuration'} = 1000000 * 60;
+      $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 0;
+      $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = 1000000 * 60;
     }
     else {
-      if ($psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration'} &&
-        !$psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'}) {
-        psSnake::do_log("requested to reread configuration, waiting for children to stop");
-        $psSnake::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 1;
+      if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} &&
+        !$snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'}) {
+        snaked::do_log("requested to reread configuration, waiting for children to stop");
+        $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 1;
       }
     }
   }
-  if ($psSnake::Daemon::runtime->{'flags'}->{'restart'}) {
-    if ($psSnake::debug) {
-      psSnake::warn("unable to restart attached daemon");
-      $psSnake::Daemon::runtime->{'flags'}->{'restart'} = 0;
+  if ($snaked::Daemon::runtime->{'flags'}->{'restart'}) {
+    if ($snaked::debug) {
+      snaked::warn("unable to restart attached daemon");
+      $snaked::Daemon::runtime->{'flags'}->{'restart'} = 0;
     }
     else {
-      if (!$psSnake::Daemon::runtime->{'flags'}->{'stop'}) {
-        psSnake::do_log("[$$] requested to restart");
-        $psSnake::Daemon::runtime->{'flags'}->{'stop'} = 1;
+      if (!$snaked::Daemon::runtime->{'flags'}->{'stop'}) {
+        snaked::do_log("[$$] requested to restart");
+        $snaked::Daemon::runtime->{'flags'}->{'stop'} = 1;
       }
     }
   }
 
   # do processing if we were not requested to stop
-  unless ($psSnake::Daemon::runtime->{'flags'}->{'stop'}) {
+  unless ($snaked::Daemon::runtime->{'flags'}->{'stop'}) {
 
-    my $task_groups = $psSnake::Daemon::runtime->{'task_groups'};
+    my $task_groups = $snaked::Daemon::runtime->{'task_groups'};
 
     # run all the tasks one by one (task groups are concurrent)
     foreach my $tg (keys %{$task_groups}) {
-      $psSnake::Daemon::runtime->{'current_tasks'}->{$tg} = {}
-        unless $psSnake::Daemon::runtime->{'current_tasks'}->{$tg};
+      $snaked::Daemon::runtime->{'current_tasks'}->{$tg} = {}
+        unless $snaked::Daemon::runtime->{'current_tasks'}->{$tg};
 
-      my $current_tasks = $psSnake::Daemon::runtime->{'current_tasks'}->{$tg};
-      my $configured_tasks = $psSnake::Daemon::runtime->{'tasks'};
+      my $current_tasks = $snaked::Daemon::runtime->{'current_tasks'}->{$tg};
+      my $configured_tasks = $snaked::Daemon::runtime->{'tasks'};
 
       if (scalar(keys %{$current_tasks})) {
         # process tasks in this task group
@@ -1717,7 +1714,7 @@ while (1) {
 
           next if $do_not_run;
 
-          psSnake::debug("starting [$task_name]");
+          snaked::debug("starting [$task_name]");
           add_child($task_name);
         }
       }
@@ -1732,12 +1729,12 @@ while (1) {
             if (!$child_e->{'startup_sleep'}) {
               $child_e->{'startup_sleep'} = int(rand($task->{'start_random_sleep'}));
               $child_e->{'startup_sleep_started'} = $now;
-              psSnake::debug("task [$task_name] random sleep [$child_e->{'startup_sleep'}]");
+              snaked::debug("task [$task_name] random sleep [$child_e->{'startup_sleep'}]");
             }
 
             if ($now - $child_e->{'startup_sleep_started'} > $child_e->{'startup_sleep'}) {
               $child_e->{'startup_sleep_finished'} = $now;
-              psSnake::debug("task [$task_name] random sleep finished");
+              snaked::debug("task [$task_name] random sleep finished");
             }
           }
           else {
@@ -1772,14 +1769,14 @@ while (1) {
     # wait for children to exit and exit then
     if (have_children()) {
       for_each_child ({'stop_now' => 1});
-      psSnake::debug("waiting for children to exit");
+      snaked::debug("waiting for children to exit");
       sleep 1;
     }
     else {
-      unlink($psSnake::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})
-        if $psSnake::Daemon::runtime->{'config'}->{'pidfile'};
+      unlink($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})
+        if $snaked::Daemon::runtime->{'config'}->{'pidfile'};
       
-      psSnake::do_log("[$$] stopped");
+      snaked::do_log("[$$] stopped");
 
       # do not restart watchdogs on restart as they will try
       # to start snaked if restart fails (which should not happen
@@ -1789,7 +1786,7 @@ while (1) {
       # to notify them about restart so they could extend
       # their waiting cycle a bit
       #
-      if ($psSnake::Daemon::runtime->{'flags'}->{'restart'}) {
+      if ($snaked::Daemon::runtime->{'flags'}->{'restart'}) {
         exec_ps_snaked($my_command_line, $my_path);
       }
       else {
@@ -1800,8 +1797,8 @@ while (1) {
     }
   }
 
-  if ($psSnake::debug) {
-    psSnake::debug("-");
+  if ($snaked::debug) {
+    snaked::debug("-");
     sleep (1);
   }
   else {
@@ -1814,8 +1811,8 @@ while (1) {
     }
 
    usleep($usec_to_sleep);
-   $psSnake::Daemon::runtime->{'usec_2check_watchdog'} = $psSnake::Daemon::runtime->{'usec_2check_watchdog'} - $usec_to_sleep;
-   $psSnake::Daemon::runtime->{'usec_2refresh_configuration'} = $psSnake::Daemon::runtime->{'usec_2refresh_configuration'} - $usec_to_sleep;
+   $snaked::Daemon::runtime->{'usec_2check_watchdog'} = $snaked::Daemon::runtime->{'usec_2check_watchdog'} - $usec_to_sleep;
+   $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = $snaked::Daemon::runtime->{'usec_2refresh_configuration'} - $usec_to_sleep;
   }
 }
 

@@ -1,4 +1,7 @@
-package psSnake;
+package snaked;
+
+use vars qw($VERSION);
+$VERSION = '0.03';
 
 use strict;
 use warnings;
@@ -69,10 +72,10 @@ sub write_file_option {
   my ($filename, $value, $opts) = @_;
 
   $opts = {} unless $opts;
-  my $fh = psSnake::safe_open($filename, "overwrite", {'timeout' => 2});
+  my $fh = snaked::safe_open($filename, "overwrite", {'timeout' => 2});
   return 0 unless $fh;
   print $fh $value . "\n";
-  psSnake::safe_close($fh);
+  snaked::safe_close($fh);
 }
 
 sub read_file_scalar {
@@ -80,7 +83,7 @@ sub read_file_scalar {
 
   my $filecontent;
   unless (open F, $filename) {
-    psSnake::die("Couldn't open $filename for reading: $!");
+    snaked::die("Couldn't open $filename for reading: $!");
   }
   { local $/ = undef; $filecontent = <F>; }
   close F;
@@ -112,7 +115,7 @@ sub fileinfo_struct {
 
   $opts = {} unless $opts;
 
-  psSnake::die("fileinfo_struct: absolute_name must be specified")
+  snaked::die("fileinfo_struct: absolute_name must be specified")
     unless $opts->{'absolute_name'};
 
   my $entry = {};
@@ -189,7 +192,7 @@ sub read_dir {
       return 0;
     }
     else {
-      psSnake::die("ERROR: unable to open directory [$dirname]");
+      snaked::die("ERROR: unable to open directory [$dirname]");
     }
   }
 
@@ -250,7 +253,7 @@ sub read_dir {
       $relative_entry_name .= $e;
 
       # populate entry struct
-      my $entry = psSnake::fileinfo_struct({
+      my $entry = snaked::fileinfo_struct({
         'absolute_name' => $absolute_name,
         'relative_name' => $relative_entry_name,
         'short_name' => $e,
@@ -285,9 +288,9 @@ sub install_layered_signal {
 
   my %available_signals = map {$_ => 1} keys %SIG;
 
-  psSnake::die("install_layered_signal got nonexistent signal name [$s]")
+  snaked::die("install_layered_signal got nonexistent signal name [$s]")
     unless defined($available_signals{$s});
-  psSnake::die("install_layered_signal expects coderef")
+  snaked::die("install_layered_signal expects coderef")
     if !ref($handler_code) || ref($handler_code) ne 'CODE';
 
   my $previous_handler = $SIG{$s};
@@ -481,7 +484,7 @@ sub open3_run {
 
     foreach my $fd ($select->can_read(1/100)) {
       my $str = $child_output->{$fd->fileno};
-      psSnake::die("child stream not found: $fd") unless $str;
+      snaked::die("child stream not found: $fd") unless $str;
 
       my $data;
       my $count = $fd->sysread($data, $str->{'block_size'});
@@ -500,7 +503,7 @@ sub open3_run {
         $fd->close();
       }
       else {
-        psSnake::die("error during sysread: " . $!);
+        snaked::die("error during sysread: " . $!);
       }
     }
   }
@@ -556,11 +559,11 @@ sub run_forked {
   my $parent_info_socket;
 
   socketpair($child_stdout_socket, $parent_stdout_socket, AF_UNIX, SOCK_STREAM, PF_UNSPEC) ||
-    psSnake::die ("socketpair: $!");
+    snaked::die ("socketpair: $!");
   socketpair($child_stderr_socket, $parent_stderr_socket, AF_UNIX, SOCK_STREAM, PF_UNSPEC) ||
-    psSnake::die ("socketpair: $!");
+    snaked::die ("socketpair: $!");
   socketpair($child_info_socket, $parent_info_socket, AF_UNIX, SOCK_STREAM, PF_UNSPEC) ||
-    psSnake::die ("socketpair: $!");
+    snaked::die ("socketpair: $!");
 
   $child_stdout_socket->autoflush(1);
   $parent_stdout_socket->autoflush(1);
@@ -584,19 +587,19 @@ sub run_forked {
     # prepare sockets to read from child
 
     $flags = 0;
-    fcntl($child_stdout_socket, F_GETFL, $flags) || psSnake::die("can't fnctl F_GETFL: $!");
+    fcntl($child_stdout_socket, F_GETFL, $flags) || snaked::die("can't fnctl F_GETFL: $!");
     $flags |= O_NONBLOCK;
-    fcntl($child_stdout_socket, F_SETFL, $flags) || psSnake::die("can't fnctl F_SETFL: $!");
+    fcntl($child_stdout_socket, F_SETFL, $flags) || snaked::die("can't fnctl F_SETFL: $!");
 
     $flags = 0;
-    fcntl($child_stderr_socket, F_GETFL, $flags) || psSnake::die("can't fnctl F_GETFL: $!");
+    fcntl($child_stderr_socket, F_GETFL, $flags) || snaked::die("can't fnctl F_GETFL: $!");
     $flags |= O_NONBLOCK;
-    fcntl($child_stderr_socket, F_SETFL, $flags) || psSnake::die("can't fnctl F_SETFL: $!");
+    fcntl($child_stderr_socket, F_SETFL, $flags) || snaked::die("can't fnctl F_SETFL: $!");
 
     $flags = 0;
-    fcntl($child_info_socket, F_GETFL, $flags) || psSnake::die("can't fnctl F_GETFL: $!");
+    fcntl($child_info_socket, F_GETFL, $flags) || snaked::die("can't fnctl F_GETFL: $!");
     $flags |= O_NONBLOCK;
-    fcntl($child_info_socket, F_SETFL, $flags) || psSnake::die("can't fnctl F_SETFL: $!");
+    fcntl($child_info_socket, F_SETFL, $flags) || snaked::die("can't fnctl F_SETFL: $!");
 
 #    print "child $pid started\n";
 
@@ -665,7 +668,7 @@ sub run_forked {
       }
 
       if ($got_sig_quit) {
-#        psSnake::do_log("ending process group $pid", {'stderr' => 1});
+#        snaked::do_log("ending process group $pid", {'stderr' => 1});
         kill_gently ($pid, {
           'first_kill_type' => 'process_group',
           'final_kill_type' => 'process_group',
@@ -800,7 +803,7 @@ sub run_forked {
     return $o;
   }
   else {
-    psSnake::die("cannot fork: $!") unless defined($pid);
+    snaked::die("cannot fork: $!") unless defined($pid);
 
     # create new process session for open3 call,
     # so we hopefully can kill all the subprocesses
@@ -808,7 +811,7 @@ sub run_forked {
     # which do setsid theirselves -- can't do anything
     # with those)
 
-    POSIX::setsid() || psSnake::die("Error running setsid: " . $!);
+    POSIX::setsid() || snaked::die("Error running setsid: " . $!);
 
     close($child_stdout_socket);
     close($child_stderr_socket);
@@ -851,7 +854,7 @@ sub run_forked {
 sub debug2 {
   my ($text, $opts) = @_;
   
-  if ($psSnake::debug2) {
+  if ($snaked::debug2) {
     debug($text, $opts);
   }
 }
@@ -861,7 +864,7 @@ sub debug {
 
   $opts = {} unless $opts;
 
-  if ($psSnake::debug) {
+  if ($snaked::debug) {
     my $stamp = localtime() . ": ";
 
     utf8::encode($text) if utf8::is_utf8($text);
@@ -1005,51 +1008,51 @@ sub do_log {
     if ($stderr) {
       print STDERR $message_formatted;
     }
-    elsif ($psSnake::debug) {
+    elsif ($snaked::debug) {
       print $message_formatted;
     }
     
     my $log_filename;
     my $log_dirname;
 
-    if (!defined($psSnake::LOG)) {
-      print STDERR "psSnake::LOG not configured: $message_formatted\n";
+    if (!defined($snaked::LOG)) {
+      print STDERR "snaked::LOG not configured: $message_formatted\n";
       return;
     }
-    if (ref($psSnake::LOG)) {
-      $log_filename = $psSnake::LOG->{'filename'};
+    if (ref($snaked::LOG)) {
+      $log_filename = $snaked::LOG->{'filename'};
       if (!$log_filename) {
-        print STDERR "psSnake::LOG->{'filename'} not configured: $message_formatted\n";
+        print STDERR "snaked::LOG->{'filename'} not configured: $message_formatted\n";
         return;
       }
     }
     else {
-      $log_filename = $psSnake::LOG;
+      $log_filename = $snaked::LOG;
     }
 
     $log_dirname = dirname($log_filename);
     if (! -d $log_dirname) {
-      File::Path::mkpath($log_dirname) || return psSnake::warn("[$log_filename] does not exist and unable to create [$log_dirname]");
+      File::Path::mkpath($log_dirname) || return snaked::warn("[$log_filename] does not exist and unable to create [$log_dirname]");
     }
 
-    if (ref($psSnake::LOG) && $psSnake::LOG->{'rotate_size'}) {
+    if (ref($snaked::LOG) && $snaked::LOG->{'rotate_size'}) {
       # quick check that we might need to do rotation
       my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,
        $atime,$mtime,$ctime,$blksize,$blocks) = stat($log_filename);
 
-      if ($size && $size > $psSnake::LOG->{'rotate_size'}) {
+      if ($size && $size > $snaked::LOG->{'rotate_size'}) {
 
         my $rotated = 0;
         
         # if it seems that rotation is needed -- lock file
         # and retry (someone might already done that)
         my $rfh = safe_open($log_filename, "");
-        psSnake::die ("Unable to open $log_filename; log message: $message_formatted", {'no_log' => 1})
+        snaked::die ("Unable to open $log_filename; log message: $message_formatted", {'no_log' => 1})
           unless $rfh;
 
         ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,
          $atime,$mtime,$ctime,$blksize,$blocks) = stat($log_filename);
-        if ($size && $size > $psSnake::LOG->{'rotate_size'}) {
+        if ($size && $size > $snaked::LOG->{'rotate_size'}) {
           link($log_filename, $log_filename . "." . time()) && unlink($log_filename) && ($rotated = 1);
         }
         else {
@@ -1057,10 +1060,10 @@ sub do_log {
         }
         safe_close($rfh);
 
-        if ($rotated && $psSnake::LOG->{'rotate_keep_copies'}) {
+        if ($rotated && $snaked::LOG->{'rotate_keep_copies'}) {
           my $dummy;
           if (!opendir($dummy, $log_dirname)) {
-            psSnake::warn("unable to open log directory [$log_dirname] during log rotation");
+            snaked::warn("unable to open log directory [$log_dirname] during log rotation");
           }
           else {
             my @all_entries = readdir($dummy);
@@ -1072,8 +1075,8 @@ sub do_log {
               next if ! -e "$log_dirname/$e";
 
               $log_archive_count = $log_archive_count + 1;
-              if ($log_archive_count > $psSnake::LOG->{'rotate_keep_copies'}) {
-                unlink("$log_dirname/$e") || psSnake::warn("unable to delete expired log archive [$log_dirname/$e]");
+              if ($log_archive_count > $snaked::LOG->{'rotate_keep_copies'}) {
+                unlink("$log_dirname/$e") || snaked::warn("unable to delete expired log archive [$log_dirname/$e]");
               }
             }
           }
@@ -1082,7 +1085,7 @@ sub do_log {
     }
 
     my $fh = safe_open($log_filename, ">>");
-    psSnake::die ("Unable to open $log_filename; log message: $message_formatted", {'no_log' => 1})
+    snaked::die ("Unable to open $log_filename; log message: $message_formatted", {'no_log' => 1})
       unless $fh;
 
 #    binmode($fh, ":utf8");
@@ -1122,21 +1125,21 @@ sub can_write {
 
 # are we able to log
 sub can_log {
-  if (defined($psSnake::LOG)) {
+  if (defined($snaked::LOG)) {
     my $log_filename;
-    if (ref($psSnake::LOG)) {
-      $log_filename = $psSnake::LOG->{'filename'};
+    if (ref($snaked::LOG)) {
+      $log_filename = $snaked::LOG->{'filename'};
       if (!$log_filename) {
-        $psSnake::LOG = undef;
+        $snaked::LOG = undef;
         return 0;
       }
     }
     else {
-      $log_filename = $psSnake::LOG;
+      $log_filename = $snaked::LOG;
     }
 
     if (!can_write($log_filename)) {
-      $psSnake::LOG = undef;
+      $snaked::LOG = undef;
       return 0;
     }
   }
@@ -1147,12 +1150,12 @@ sub can_log {
 sub add_hook {
   my ($opts) = @_;
 
-  psSnake::die("add_hook: invalid input")
+  snaked::die("add_hook: invalid input")
     unless $opts->{'type'} &&
       ref($opts->{'func'}) eq 'CODE' &&
       ref($opts->{'args'}) eq 'ARRAY';
   
-  push @{$psSnake::HOOKS->{$opts->{'type'}}}, {
+  push @{$snaked::HOOKS->{$opts->{'type'}}}, {
     'func' => $opts->{'func'},
     'args' => $opts->{'args'},
     };
@@ -1161,8 +1164,8 @@ sub add_hook {
 sub run_hook {
   my ($type) = @_;
 
-  if (scalar(@{$psSnake::HOOKS->{$type}}) gt 0) {
-    my $h = pop(@{$psSnake::HOOKS->{$type}});
+  if (scalar(@{$snaked::HOOKS->{$type}}) gt 0) {
+    my $h = pop(@{$snaked::HOOKS->{$type}});
     $h->{'func'}->(@{$h->{'args'}});
   }
 }
@@ -1170,15 +1173,15 @@ sub run_hook {
 sub run_hooks {
   my ($type) = @_;
 
-  while (scalar(@{$psSnake::HOOKS->{$type}}) gt 0) {
-    psSnake::run_hook($type);
+  while (scalar(@{$snaked::HOOKS->{$type}}) gt 0) {
+    snaked::run_hook($type);
   }
 }
 
 sub warn {
   my ($text) = @_;
   print STDERR "WARNING: $text\n";
-  psSnake::do_log("[WARN] " . $text);
+  snaked::do_log("[WARN] " . $text);
 }
 
 sub die {
@@ -1191,8 +1194,8 @@ sub die {
     $opts->{'show_callstack'} = 1;
   }
 
-  if ($psSnake::HOOKS->{'before_die'} && scalar(@{$psSnake::HOOKS->{'before_die'}})) {
-    psSnake::run_hooks("before_die");
+  if ($snaked::HOOKS->{'before_die'} && scalar(@{$snaked::HOOKS->{'before_die'}})) {
+    snaked::run_hooks("before_die");
   }
   
   print STDERR ($message ? $message : "");
@@ -1205,7 +1208,7 @@ sub die {
   }
 
   if (!$opts->{'no_log'}) {
-    psSnake::do_log("[ERR] " . $message);
+    snaked::do_log("[ERR] " . $message);
   }
   else {
     # try logger here?
@@ -1390,7 +1393,7 @@ sub safe_string {
 sub send_mail {
   my ($opts) = @_;
 
-  psSnake::die("Programmer error: send_mail expects hashref with at least 'to' set")
+  snaked::die("Programmer error: send_mail expects hashref with at least 'to' set")
     unless $opts && $opts->{'to'};
   
   foreach my $att (qw /subject body cc bcc/) {
@@ -1406,7 +1409,7 @@ sub send_mail {
       @b = @{$a};
     }
     else {
-      psSnake::canonize_delimiters(\$a);
+      snaked::canonize_delimiters(\$a);
       @b = split(/\ /, $a);
     }
 
@@ -1428,15 +1431,15 @@ sub send_mail {
     $opts->{$f} = $process_emails_to_array->($opts->{$f});
   }
 
-  push (@{$opts->{'cc'}}, $psSnake::CC_ALL) if $psSnake::CC_ALL && !$opts->{'no_cc_all'};
-  push (@{$opts->{'bcc'}}, $psSnake::BCC_ALL) if $psSnake::BCC_ALL && !$opts->{'no_bcc_all'};
+  push (@{$opts->{'cc'}}, $snaked::CC_ALL) if $snaked::CC_ALL && !$opts->{'no_cc_all'};
+  push (@{$opts->{'bcc'}}, $snaked::BCC_ALL) if $snaked::BCC_ALL && !$opts->{'no_bcc_all'};
 
   foreach my $f (qw/to cc bcc/) {
-    my @a = psSnake::array_clear_dupes($opts->{$f});
+    my @a = snaked::array_clear_dupes($opts->{$f});
     $opts->{$f} = $process_emails_to_string->(\@a);
   }
    
-  $opts->{'from'} = $psSnake::MAIL_FROM
+  $opts->{'from'} = $snaked::MAIL_FROM
     unless $opts->{'from'};
 
   my @log_to;
@@ -1471,8 +1474,8 @@ sub send_mail {
 
     $msg->attr("content-type.charset" => $opts->{'charset'})
       if $opts->{'charset'} &&
-        ! (psSnake::is_ascii($opts->{'body'}) &&
-        psSnake::is_ascii($opts->{'subject'}));
+        ! (snaked::is_ascii($opts->{'body'}) &&
+        snaked::is_ascii($opts->{'subject'}));
 
     if ($opts->{'attach'}) {
       my $mm = new File::MMagic;
@@ -1493,7 +1496,7 @@ sub send_mail {
     }
 
     unless ($msg->send()) {
-      psSnake::do_log("Unable to send mail through MIME::Lite; recipients: [" . join (" ", @log_to) . "]", {"stderr" => 1});
+      snaked::do_log("Unable to send mail through MIME::Lite; recipients: [" . join (" ", @log_to) . "]", {"stderr" => 1});
       return 0;
     }
   }
@@ -1509,15 +1512,15 @@ sub send_mail {
       }
     }
 
-    my $r = psSnake::run_forked("mail -s \"$subj\" $to_scalar", {'child_stdin' => $opts->{'body'}});
+    my $r = snaked::run_forked("mail -s \"$subj\" $to_scalar", {'child_stdin' => $opts->{'body'}});
     if ($r->{'exit_code'} ne 0) {
-      psSnake::do_log("Unable to send mail through system mailer, exit_code [$r->{'exit_code'}], stderr [$r->{'stderr'}], " .
+      snaked::do_log("Unable to send mail through system mailer, exit_code [$r->{'exit_code'}], stderr [$r->{'stderr'}], " .
         "to [$to_scalar], message [" . substr($opts->{'body'}, 0, 200) . "] ", {"stderr" => 1});
       return 0;
     }
   }
 
-  psSnake::do_log("sent mail " . join (" ", @log_to));
+  snaked::do_log("sent mail " . join (" ", @log_to));
 
   return 1;
 }

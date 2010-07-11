@@ -3,7 +3,7 @@ use strict;
 use ExtUtils::MakeMaker;
 
 WriteMakefile( NAME            => 'snaked',
-               VERSION_FROM => 'snaked',
+               VERSION_FROM => 'lib/snaked.pm',
 #               VERSION    => '0.02',
                ABSTRACT_FROM => 'snaked',
                EXE_FILES       => [ 'snaked' ],
