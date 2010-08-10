@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 #
-#   PS-Farm daemon, near copy of golem daemon
-#   (simple cron implementation with task dependencies)
+#   snaked: cool cron replacement.
 #
-#   kohts@yandex-team.ru
+#
+#   petya@kohts.ru
 #
 #
 
@@ -29,36 +29,6 @@ BEGIN {
   if (!$ENV{'PS_SNAKED_LIB'}) {
     $ENV{'PS_SNAKED_LIB'} = $ENV{'MY_LIB'};
   }
-
-  my $cfg_next = 0;
-  foreach my $arg (@ARGV) {
-    if ($arg eq '--cfg') {
-      $cfg_next = 1;
-      next;
-    }
-    if ($cfg_next) {
-      $ENV{'PS_SNAKED_CFG'} = $arg;
-      last;
-    }
-  }
-
-  unless ($ENV{'PS_SNAKED_CFG'}) {
-    $ENV{'PS_SNAKED_CFG'} = $ENV{'MY_ETC'};
-
-    if (! -d $ENV{'PS_SNAKED_CFG'}) {
-      $ENV{'PS_SNAKED_CFG'} = ($ENV{'MY_ROOT'} eq "/" ? "" : $ENV{'MY_ROOT'}) .
-        "/etc/ps-farm/options/ps-snaked";
-    }
-    if (! -d $ENV{'PS_SNAKED_CFG'} && -d "/etc/ps-farm/options/ps-snaked") {
-      $ENV{'PS_SNAKED_CFG'} = "/etc/ps-farm/options/ps-snaked";
-    }
-    if (! -d $ENV{'PS_SNAKED_CFG'} && -d "/etc/snaked") {
-      $ENV{'PS_SNAKED_CFG'} = "/etc/snaked";
-    }
-  }
-
-  die "$ENV{'PS_SNAKED_CFG'} is not available. Unable to continue\n\n"
-    unless -d "$ENV{'PS_SNAKED_CFG'}";
 };
 
 use strict;
@@ -67,13 +37,8 @@ use warnings;
 use lib "$ENV{'MY_LIB'}";
 use lib "$ENV{'PS_SNAKED_LIB'}";
 use snaked;
-
-package psProcess;
-sub pid { my ($self) = @_; return $self->{'pid'}; }
-sub ppid { my ($self) = @_; return $self->{'ppid'}; }
-sub pgrp { my ($self) = @_; return $self->{'pgid'}; }
-sub pgid { my ($self) = @_; return $self->{'pgid'}; }
-sub cmndline { my ($self) = @_; return $self->{'cmd'}; }
+use Yandex::Tools;
+use Yandex::Tools::ProcessList;
 
 package snaked::Daemon;
 use Storable;
@@ -85,17 +50,9 @@ use IO::Handle; # autoflush
 use Socket; # socketpair
 use Fcntl;
 
-if ($^O ne 'linux') {
-  require Proc::ProcessTable;
-}
+my $version = '($Id: snaked 4283 2010-08-10 11:02:21Z kohts $)';
 
-my $version = '($Id: snaked 3935 2010-06-22 19:22:02Z kohts $)';
-
-my $daemon_match_cfg = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+(daemon|debug).+cfg.+$ENV{'PS_SNAKED_CFG'}/;
-my $daemon_match_cfg1 = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+cfg.+$ENV{'PS_SNAKED_CFG'}.+(daemon|debug)/;
-my $daemon_match_nocfg = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+(daemon|debug)/;
-my $watchdog_match = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+(watchdog).+cfg.+$ENV{'PS_SNAKED_CFG'}/;
-my $watchdog_match1 = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+cfg.+$ENV{'PS_SNAKED_CFG'}.+(watchdog)/;
+my ($daemon_regexp_configured, $daemon_match_cfg, $daemon_match_cfg1, $daemon_match_nocfg, $watchdog_match, $watchdog_match1);
 
 my $my_path;
 my $my_command_line;
@@ -127,7 +84,7 @@ $snaked::Daemon::runtime = {
   };
 
 sub sigTERM_handler {
-#  snaked::do_log("snaked $$ term");
+#  Yandex::Tools::do_log("snaked $$ term");
   if ($snaked::Daemon::runtime->{'type'} eq 'master') {
     $snaked::Daemon::runtime->{'flags'}->{'stop'} = 1;
   }
@@ -200,42 +157,43 @@ sub do_err_log {
   my $config = $snaked::Daemon::runtime->{'config'};
 
   if (config_value('log_errors')) {
-    my $tmp_log = $snaked::LOG->{'filename'};
-    $snaked::LOG->{'filename'} = config_value('log_errors');
+    my $tmp_log = Yandex::Tools::get_log_filename();
+    Yandex::Tools::set_log_filename(config_value('log_errors'));
     
     # just in case it fails
     my $res = eval {
-      snaked::do_log($msg);
+      Yandex::Tools::do_log($msg);
     };
 
-    $snaked::LOG->{'filename'} = $tmp_log;
+    Yandex::Tools::set_log_filename($tmp_log);
   }
 }
 
 sub run_task {
   my ($task_name) = @_;
   
+  my $config = $snaked::Daemon::runtime->{'config'};
   my $task = $snaked::Daemon::runtime->{'tasks'}->{$task_name};
 
   my $old_job_name;
   $old_job_name = $ENV{'JOB_NAME'} if defined($ENV{'JOB_NAME'});
   $ENV{'JOB_NAME'} = $task_name;
 
-  snaked::debug("running task [$task_name] timeout [$task->{'execution_timeout'}] kill timeout [$task->{'kill_timeout'}]");
-  my $o = snaked::run_forked($task->{'cmd'}, {
+  Yandex::Tools::debug("running task [$task_name] timeout [$task->{'execution_timeout'}] kill timeout [$task->{'kill_timeout'}]");
+  my $o = Yandex::Tools::run_forked($task->{'cmd'}, {
     'timeout' => $task->{'execution_timeout'},
     'terminate_on_parent_sudden_death' => 1,
     'terminate_on_signal' => 'TERM',
     'terminate_wait_time' => $task->{'kill_timeout'},
     'clean_up_children' => 1,
     });
-  snaked::debug("finished [$task_name]: " . snaked::safe_string($o->{'exit_code'}));
+  Yandex::Tools::debug("finished [$task_name]: " . Yandex::Tools::safe_string($o->{'exit_code'}));
 
   $ENV{'JOB_NAME'} = $old_job_name if $old_job_name;
 
   if ($o->{'parent_died'}) {
     do_err_log("[$$] my parent died, exiting");
-    snaked::do_log("[$$] my parent died, exiting");
+    Yandex::Tools::do_log("[$$] my parent died, exiting");
     exit 1;
   }
   elsif ($o->{'err_msg'}) {
@@ -251,8 +209,8 @@ sub run_task {
       # (notify after each failure if not defined)
       if ($task->{'notification_interval'}) {
         if ($task->{'runtime'}->{'first_failure_time'} + $task->{'notification_interval'} < time()) {
-          snaked::send_mail({
-            'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $snaked::ADMIN_EMAIL),
+          Yandex::Tools::send_mail({
+            'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $config->{'admin_email'}->{'value'}),
             'subject' => $0 . ": $task_name warning",
             'body' => $o->{'err_msg'},
             'no_cc_all' => 1,
@@ -264,8 +222,8 @@ sub run_task {
         }
       }
       else {
-        snaked::send_mail({
-          'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $snaked::ADMIN_EMAIL),
+        Yandex::Tools::send_mail({
+          'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $config->{'admin_email'}->{'value'}),
           'subject' => $0 . ": $task_name warning",
           'body' => $o->{'err_msg'},
           'no_cc_all' => 1,
@@ -293,14 +251,14 @@ sub add_child {
 
   $opts = {} unless $opts;
 
-  snaked::die ("Programmer error: add_child expects at least child type")
+  Yandex::Tools::die ("Programmer error: add_child expects at least child type")
     unless $type;
 
   my $child_socket;
   my $parent_socket;
 
   socketpair($child_socket, $parent_socket, AF_UNIX, SOCK_STREAM, PF_UNSPEC) ||
-    snaked::die ("socketpair: $!");
+    Yandex::Tools::die ("socketpair: $!");
 
   $child_socket->autoflush(1);
   $parent_socket->autoflush(1);
@@ -332,7 +290,7 @@ sub add_child {
     child_started($type);
   }
   else {
-    snaked::die("cannot fork: $!") unless defined $pid;
+    Yandex::Tools::die("cannot fork: $!") unless defined $pid;
 
     $snaked::Daemon::runtime->{'type'} = "child";
     close $child_socket;
@@ -399,7 +357,7 @@ sub child_finished {
 
   if ($output) {
     do_err_log("[$name]: $output");
-    snaked::do_log("[$name]: $output");
+    Yandex::Tools::do_log("[$name]: $output");
   }
 }
 
@@ -423,7 +381,7 @@ sub manage_child {
 sub remove_child {
   my ($pid) = @_;
 
-  snaked::die("Programmer error: remove_child called on child which hasn't finished yet")
+  Yandex::Tools::die("Programmer error: remove_child called on child which hasn't finished yet")
     if waitpid($pid,WNOHANG) ne -1;
 
   my $child = $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
@@ -441,7 +399,7 @@ sub remove_child {
     $task->{'runtime'}->{'first_failure_time'} = time()
       unless $task->{'runtime'}->{'first_failure_time'};
 
-    snaked::debug("child output: " . $child->{'output'});
+    Yandex::Tools::debug("child output: " . $child->{'output'});
 
     if (! defined($task->{'disable_notifications'})) {
       # reset failure interval counter,
@@ -481,7 +439,7 @@ sub for_each_child {
   $opts = {} unless $opts;
   foreach my $k (keys %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
     if ($opts->{'stop_now'}) {
-#      snaked::do_log("killing $k");
+#      Yandex::Tools::do_log("killing $k");
       kill(15, $k); # TERM (default for run_forked)
     }
   }
@@ -615,12 +573,13 @@ sub refreshOptions {
 
   # read daemon options
   my $new_options = {};
+  my $old_log_options = Yandex::Tools::get_log_options();
 
-  $tmp = snaked::read_dir($dir, {'output_type' => 'arrayref', 'only-files' => 1});
+  $tmp = Yandex::Tools::read_dir($dir, {'output_type' => 'arrayref', 'only-files' => 1});
   foreach my $o (@{$tmp}) {
     next if $o =~ /^\./o;
 
-    my $fileinfo = snaked::fileinfo_struct({'absolute_name' => $dir . "/" . $o});
+    my $fileinfo = Yandex::Tools::fileinfo_struct({'absolute_name' => $dir . "/" . $o});
 
     $new_options->{$o} = 1;
 
@@ -632,53 +591,59 @@ sub refreshOptions {
     my $option_updated = ($config->{$o} ? 1 : 0);
 
     $config->{$o}->{'mtime'} = $fileinfo->{'mtime'};
-    $config->{$o}->{'value'} = snaked::read_file_option($dir . "/" . $o);
+    $config->{$o}->{'value'} = Yandex::Tools::read_file_option($dir . "/" . $o);
 
     if ($option_updated) {
-      snaked::do_log("new value for option $o: " . $config->{$o}->{'value'});
-    }
-
-    if ($o eq "admin_email") {
-      $snaked::ADMIN_EMAIL = $config->{$o}->{'value'};
+      Yandex::Tools::do_log("new value for option $o: " . $config->{$o}->{'value'});
     }
   }
 
   # remove old options
   foreach my $opt_name (keys %{$config}) {
     next if $new_options->{$opt_name};
+    next if $opt_name eq 'admin_email'; # should list all options which have defaults here
     
     delete ($config->{$opt_name});
-    snaked::do_log("option $opt_name removed");
+    Yandex::Tools::do_log("option $opt_name removed");
   }
 
-  if (!$snaked::ADMIN_EMAIL) {
-    $snaked::ADMIN_EMAIL = 'root';
+  if (!$config->{'admin_email'}) {
+    $config->{'admin_email'} = {
+      'value' => 'root',
+      'mtime' => 0,
+      };
   }
 
   # configure logging (defaults to /tmp/ps-snaked.log, three 10MB files, rotated)
   #
+  my $log_options = {};
   if ($config->{'log'}) {
-    $snaked::LOG = {
-      'filename' => $config->{'log'}->{'value'},
-      };
+    $log_options->{'filename'} = $config->{'log'}->{'value'};
   }
   else {
-    $snaked::LOG = {
-      'filename' => ($ENV{'MY_ROOT'} eq "/" ? "" : $ENV{'MY_ROOT'}) . "/tmp/snaked.log",
-      };
+    $log_options->{'filename'} = ($ENV{'MY_ROOT'} eq "/" ? "" : $ENV{'MY_ROOT'}) . "/tmp/snaked.log";
   }
-  
   if ($config->{'log_rotate_size'}) {
-    $snaked::LOG->{'rotate_size'} = $config->{'log_rotate_size'}->{'value'};
+    $log_options->{'rotate_size'} = $config->{'log_rotate_size'}->{'value'};
   }
   else {
-    $snaked::LOG->{'rotate_size'} = 1024 * 1024 * 10;
+    $log_options->{'rotate_size'} = 1024 * 1024 * 10;
   }
   if ($config->{'log_rotate_keep_copies'}) {
-    $snaked::LOG->{'rotate_keep_copies'} = $config->{'log_rotate_keep_copies'}->{'value'};
+    $log_options->{'rotate_keep_copies'} = $config->{'log_rotate_keep_copies'}->{'value'};
   }
   else {
-    $snaked::LOG->{'rotate_keep_copies'} = 2;
+    $log_options->{'rotate_keep_copies'} = 2;
+  }
+  Yandex::Tools::set_log_options($log_options);
+
+  if (!Yandex::Tools::get_log_options() || !Yandex::Tools::can_log()) {
+    if ($old_log_options) {
+      Yandex::Tools::set_log_options($old_log_options);
+    }
+    else {
+      Yandex::Tools::warn("Can not write to log file [$log_options->{'filename'}], check permissions; logging to STDERR");
+    }
   }
 
   # in watchdog mode we don't need
@@ -689,13 +654,13 @@ sub refreshOptions {
   my $defined_jobs = {};
 
   # read daemon jobs
-  $tmp = snaked::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
+  $tmp = Yandex::Tools::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
   foreach my $o (@{$tmp}) {
     next if $o =~ /^\./o;
 
     $defined_jobs->{$o} = 1;
 
-    my $dirinfo = snaked::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
+    my $dirinfo = Yandex::Tools::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
 
     # job was not modified since we've read it
     if ($tasks->{$o} && $tasks->{$o}->{'mtime'} eq $dirinfo->{'mtime'}) {
@@ -703,21 +668,21 @@ sub refreshOptions {
     }
 
     if ($tasks->{$o}) {
-      snaked::do_log("reread job [$o] from disk");
+      Yandex::Tools::do_log("reread job [$o] from disk");
     }
 
     $tasks->{$o}->{'mtime'} = $dirinfo->{'mtime'};
 
-    my $joptions = snaked::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
+    my $joptions = Yandex::Tools::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
     foreach my $jo (@{$joptions}) {
       if ($jo eq 'conflicts') {
-        $tasks->{$o}->{$jo} = snaked::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
+        $tasks->{$o}->{$jo} = Yandex::Tools::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
       }
       elsif ($jo eq 'cmd') {
         $tasks->{$o}->{$jo} = $dir . "/jobs/" . $o . "/" . $jo;
       }
       else {
-        $tasks->{$o}->{$jo} = snaked::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
+        $tasks->{$o}->{$jo} = Yandex::Tools::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
       }
     }
     if (defined($tasks->{$o}->{'disabled'}) && !$opts->{'keep_disabled'}) {
@@ -728,7 +693,7 @@ sub refreshOptions {
   # cleanup removed jobs, validate tasks
   TASKS: foreach my $task_name (keys %{$tasks}) {
     if (!$defined_jobs->{$task_name}) {
-      snaked::do_log("job [$task_name] removed");
+      Yandex::Tools::do_log("job [$task_name] removed");
       delete($tasks->{$task_name});
       next TASKS;
     }
@@ -745,13 +710,13 @@ sub refreshOptions {
 
     foreach my $mp ("cmd") {
       if (!$task->{$mp}) {
-        snaked::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
+        Yandex::Tools::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
         delete($tasks->{$task_name});
         next TASKS;
       }
     }
     if (! -x $task->{'cmd'}) {
-      snaked::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
+      Yandex::Tools::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
       delete($tasks->{$task_name});
       next TASKS;
     }
@@ -759,7 +724,7 @@ sub refreshOptions {
     if ((!$task->{'execution_interval'} && !$task->{'execution_schedule'}) ||
       ($task->{'execution_interval'} && $task->{'execution_schedule'})) {
       
-      snaked::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
+      Yandex::Tools::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
       delete($tasks->{$task_name});
       next TASKS;
     }
@@ -778,7 +743,7 @@ sub refreshOptions {
         $msg =~ s/at\ \/.+$//sgo;
         $msg = ": $msg" if $msg;
 
-        snaked::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
+        Yandex::Tools::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
         delete($tasks->{$task_name});
         next TASKS;
       }
@@ -787,22 +752,22 @@ sub refreshOptions {
     }
 
     foreach my $dp ("execution_interval", "execution_timeout", "notification_interval", "start_random_sleep") {
-      if ($task->{$dp} && !snaked::is_digital($task->{$dp})) {
-        snaked::do_log("skipping job [$task_name]: [$dp] must be numeric");
+      if ($task->{$dp} && !Yandex::Tools::is_digital($task->{$dp})) {
+        Yandex::Tools::do_log("skipping job [$task_name]: [$dp] must be numeric");
         delete($tasks->{$task_name});
         next TASKS;
       }
     }
 
     if ($task->{'conflicts'} && ref($task->{'conflicts'}) ne 'ARRAY') {
-      snaked::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
+      Yandex::Tools::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
       delete($tasks->{$task_name});
       next TASKS;
     }
     if ($task->{'conflicts'}) {
       foreach my $c_task (@{$task->{'conflicts'}}) {
         if ($c_task eq $task_name) {
-          snaked::do_log("skipping job [$task_name]: task conflicts with itself.");
+          Yandex::Tools::do_log("skipping job [$task_name]: task conflicts with itself.");
           delete($tasks->{$task_name});
           next TASKS;
         }
@@ -814,341 +779,6 @@ sub refreshOptions {
   $snaked::Daemon::runtime->{'tasks'} = $tasks;
   $snaked::Daemon::runtime->{'task_groups'} = {};
   prepare_task_groups();
-}
-
-sub code_may_fail {
-  my ($code, $opts) = @_;
-
-  die("Need coderef (something to execute)")
-    unless $code && ref($code) eq 'CODE';
-  
-  $opts = {} unless $opts;
-  $opts->{'tries'} = 1 unless $opts->{'tries'};
-  $opts->{'sleep_between_tries'} = 1 unless $opts->{'sleep_between_tries'};
-
-  my $i = 0;
-  my $lastwarn = "";
-  my $code_result;
-
-  while ($i < $opts->{'tries'}) {
-    $i = $i + 1;
-
-    $SIG{'__WARN__'} = sub { $lastwarn = join("\n", @_); };
-    eval { $code_result = $code->(); };
-    delete($SIG{'__WARN__'});
-
-    if ($lastwarn && $i < $opts->{'tries'}) {
-      $lastwarn = "";
-      sleep $opts->{'sleep_between_tries'};
-    }
-  }
-
-  return {
-    'result' => $code_result,
-    'warn' => $lastwarn,
-    'try' => $i,
-    };
-}
-
-sub get_process_table {
-  my $ptable;
-
-  # Proc::ProcessTable has some leaks on linux
-  # which leads to process dying
-  if ($^O eq 'linux') {
-    $ptable = [];
-    
-    my $i = 0;
-
-    my $dummy;
-    my $open_res;
-    while (!($open_res = opendir($dummy, "/proc")) && $i < 3) {
-      sleep 1;
-      $i++;
-    }
-    if (!$open_res) {
-      snaked::die("unable to read /proc");
-    }
-
-    my @all_entries;
-    $i = 0;
-    while (scalar(@all_entries) < 3 && $i < 3) {
-      @all_entries = readdir($dummy);
-      sleep 1 if $i > 0;
-      $i++;
-    }
-    close($dummy);
-
-    # . + .. eq 2
-    if (scalar(@all_entries) < 3) {
-      snaked::die("/proc is not mounted");
-    }
-
-    my $read_may_fail = sub {
-      my ($filename) = @_;
-      my $filecontent;
-      if (open F, $filename) {
-        { local $/ = undef; $filecontent = <F>; }
-        close F;
-      }
-      return $filecontent;
-    };
-
-    foreach my $e (sort @all_entries) {
-      my $pid_dir = "/proc/$e";
-
-      next if $e eq '.' || $e eq '..';
-      next if $e !~ /^\d+$/o;
-      next if ! -d $pid_dir;
-      
-      my $cmd = $read_may_fail->("$pid_dir/cmdline");
-      $cmd =~ s/\0/ /goi if $cmd;
-
-      my $stat = $read_may_fail->("$pid_dir/stat");
-      next unless $stat;
-
-      my @stat_arr = split(" ", $stat);
-      next if ! scalar(@stat_arr) > 5;
-
-      if (!$cmd) {
-        $cmd = $stat_arr[1];
-        
-        if ($cmd) {
-          $cmd =~ s/[\(\)]//goi;
-          $cmd = "[" . $cmd . "]";
-        }
-      }
-
-      my $ppid = $stat_arr[3];
-      my $pgid = $stat_arr[4];
-
-      next if ! $cmd;
-      next if ! $ppid =~ /^\d+$/o;
-      next if ! $pgid =~ /^\d+$/o;
-
-      my $p = {
-        'pid' => $e,
-        'ppid' => $ppid,
-        'pgid' => $pgid,
-        'cmd' => $cmd,
-        };
-
-      bless ($p, 'psProcess');
-      push (@{$ptable}, $p);
-    }
-
-    return $ptable;
-  }
-  else {
-    my $r = code_may_fail(sub {return Proc::ProcessTable->new()->table}, {'tries' => 3});
-
-    if (!$r->{'result'}) {
-      snaked::die("unable to get process table: " . $r->{'warn'});
-    }
-    
-    $ptable = $r->{'result'};
-  }
-
-  my $i = 0;
-  while (scalar(@{$ptable}) < 2 && $i < 3) {
-    $i++;
-    sleep 1;
-    $ptable = get_process_table();
-  }
-
-  if (scalar(@{$ptable}) < 2) {
-    snaked::die("unable to read process table");
-  }
-
-  return $ptable;
-}
-
-sub get_process_by_id {
-  my ($pid, $opts) = @_;
-
-  $opts = {} unless $opts;
-
-  my $processes;
-  if ($opts->{'processes'}) {
-    $processes = $opts->{'processes'};
-  }
-  else {
-    if (!$snaked::Daemon::runtime->{'startup_processes'}) {
-      $snaked::Daemon::runtime->{'startup_processes'} = get_process_table();
-    }
-    $processes = $snaked::Daemon::runtime->{'startup_processes'};
-  }
-
-  foreach my $p (@$processes) {
-    my $r = code_may_fail(sub {return $p->pid});
-
-    if (!$r->{'result'}) {
-#      print STDERR
-#        "empty pid: " . $p->cmndline . "; " .
-#        ((-f $p->cmndline) ? "file exists" : "file does not exist") .
-#        "; my pid [" . $$ . "]" .
-#        "\n";
-#
-# dvina: empty pid: /proc/23263/cmdline; file does not exist; my pid [23348]
-# dunai: empty pid: /proc/31978/cmdline; file does not exist; my pid [32072]
-
-      next;
-    }
-    
-    return $p if $r->{'result'} eq $pid;
-  }
-
-  return undef;
-}
-
-# get the pid of my parent process (by command line)
-# 
-sub get_my_process {
-  my ($pid) = @_;
-
-  my $orig_pid = $pid;
-
-  # trying to find daemon with the same --cfg option
-  #
-  while ($pid ne 1) {
-    my $pid_p = get_process_by_id($pid);
-
-    if (!$pid_p) {
-      snaked::die("unable to find [$pid] in process list");
-    }
-
-    if ($pid_p->cmndline &&
-      ($pid_p->cmndline =~ /$daemon_match_cfg/ || $pid_p->cmndline =~ /$daemon_match_cfg1/)
-      ) {
-      return $pid_p;
-    }
-
-    $pid = $pid_p->ppid;
-  }
-
-  # backward compatibility: trying to find
-  # any daemon without --cfg option
-  $pid = $orig_pid;
-  while ($pid ne 1) {
-    my $pid_p = get_process_by_id($pid);
-    if (!$pid_p) {
-      snaked::die("unable to find [$pid] in process list");
-    }
-
-    if ($pid_p->cmndline && $pid_p->cmndline =~ /$daemon_match_nocfg/ && $pid_p->cmndline !~ /--cfg/) {
-      return $pid_p;
-    }
-
-    $pid = $pid_p->ppid;
-  }
-
-  return undef;
-}
-
-# get pid of other daemon started with the same --cfg option
-#
-sub get_other_daemon_process {
-  my ($opts) = @_;
-  $opts = {} unless $opts;
-
-  my $processes;
-  if (!$snaked::Daemon::runtime->{'startup_processes'} || $opts->{'refresh_startup_processes'}) {
-    $snaked::Daemon::runtime->{'startup_processes'} = get_process_table();
-  }
-  $processes = $snaked::Daemon::runtime->{'startup_processes'};
-
-  # this doesn't mean "always find my process",
-  # name of the sub is not consistent!!!
-  #
-  # it usually returns undef (during --stop for example)
-  #
-  my $my_process = get_my_process($$);
-
-  my $r;
-
-  # trying to find other daemon with the same --cfg option
-  #
-  foreach my $p (@$processes) {
-    my $p_pid;
-    my $p_cmndline;
-    my $p_pgrp;
-    $r = code_may_fail(sub {$p_pid = $p->pid});
-    $r = code_may_fail(sub {$p_cmndline = $p->cmndline});
-    $r = code_may_fail(sub {$p_pgrp = $p->pgrp});
-
-    next unless $p_cmndline;
-    next if $p_cmndline !~ /$daemon_match_cfg/ && $p_cmndline !~ /$daemon_match_cfg1/;
-    
-    # find process with given command line
-    # from other process group
-    if ($my_process) {
-      next if $p->pgrp eq $my_process->pgrp;
-    }
-
-    # if we are looking for daemon then its parent should be init
-    if ($p_cmndline !~ /--debug/o && $p->ppid ne 1) {
-      next;
-    }
-
-    my $real_daemon = get_process_by_id($p_pgrp);
-    
-    # found a process for which group leader doesn't exist
-    # (shouldn't happen but just in case of some error)
-    # 
-    #
-    # real world situation:
-    #
-    # pechora:~# ps -eo pid,ppid,pgrp,cmd | grep snak | grep -v grep
-    #  5674     1  5674 /usr/bin/perl /usr/local/ps-snake/bin/snaked --watchdog --cfg /etc/ps-farm/options/ps-snaked
-    # 26550     1 25742 /usr/bin/perl /usr/local/ps-snake/bin/snaked --daemon --cfg /etc/ps-farm/options/ps-snaked
-    # 29634     1 25742 /usr/bin/perl /usr/local/ps-snake/bin/snaked --daemon --cfg /etc/ps-farm/options/ps-snaked
-    #
-    # corresponding log message about parent pid:
-    # Sat Apr 10 16:37:52 2010 [/usr/local/ps-snake/bin/snaked] [25742] started
-    # 
-    # both 26550 and 29634 were not snaked daemons
-    # but were forks doing some work (actually locked
-    # during log operation or something) but
-    # watchdog doesn't detect difference between
-    # snaked daemon and its children forks
-    # (it should and will do it one day probably)
-    # 
-    # and manual `snaked --daemon` also didn't detect them,
-    # now it kills them (their process group)
-    # before spawning new daemon
-    # 
-    if (!$real_daemon) {
-      print STDERR "cleaning up stuck process group [$p_pgrp]\n";
-      kill(-9, $p_pgrp);
-    }
-    
-    return $real_daemon;
-  }
-
-  # backward compatibility: trying to find
-  # any other daemon without --cfg option
-  #
-  foreach my $p (@$processes) {
-    my $p_pid;
-    my $p_cmndline;
-    my $p_pgrp;
-    $r = code_may_fail(sub {$p_pid = $p->pid});
-    $r = code_may_fail(sub {$p_cmndline = $p->cmndline});
-    $r = code_may_fail(sub {$p_pgrp = $p->pgrp});
-
-    next unless $p_cmndline;
-    next unless $p_cmndline =~ /$daemon_match_nocfg/;
-    next if $p_cmndline =~ /--cfg/;
-
-    if ($my_process) {
-      next if $p->pgrp eq $my_process->pgrp;
-    }
-
-    my $real_daemon = get_process_by_id($p_pgrp);
-    return $real_daemon;
-  }
-
-  return undef;
 }
 
 sub canonical_command_line {
@@ -1165,27 +795,12 @@ sub canonical_command_line {
   #   - regexp is not global so it replaces only 1st occurrence
   #
   #   - .+? is not greedy so it will find the 1st occurrence of
-  #   "ps-snaked" string which should be the name of executable
+  #   "(ps-)snaked" string which should be the name of executable
   # 
   $cmdline =~ s/.+?(ps-)?snaked(\s+|$)/${path}\/snaked /;
   $cmdline =~ s/\s+$//goi;
 
   return $cmdline;
-}
-
-sub get_my_path_commandline {
-  my ($opts) = @_;
-  my $my_path;
-  my $my_command_line;
-
-  my $me = get_process_by_id($$, $opts);
-  snaked::die("[$$]: unable to find myself in process list") unless $me;
-  $my_path = $FindBin::Bin;
-  snaked::die("[$$]: unable to find my path") unless $my_path;
-  $my_command_line = $me->cmndline;
-  snaked::die("[$$] unable to determine my command line") unless $my_command_line;
-
-  return ($my_path, $my_command_line);
 }
 
 sub exec_ps_snaked {
@@ -1206,65 +821,51 @@ sub exec_ps_snaked {
   # as a workaround for empty command line or path (why?)
   # trying to determine them during exit process
   if (!$my_command_line || !$my_path) {
-    ($my_path, $my_command_line) = get_my_path_commandline({'processes' => get_process_table()});
+    ($my_path, $my_command_line) = Yandex::Tools::ProcessList::get_my_path_commandline({'processes' =>
+      Yandex::Tools::ProcessList::get_process_table()});
   }
 
-  if (my $pid = fork) {
-    # parent
-    exit 0;
+  $my_command_line = canonical_command_line($my_command_line, $my_path);
+
+  # append --cfg parameter if it's not specified
+  # (codepath is used only during first run
+  # when path to configuration was specified
+  # by environment variable)
+  if ($my_command_line !~ /--cfg $ENV{'PS_SNAKED_CFG'}/) {
+    $my_command_line .= " --cfg $ENV{'PS_SNAKED_CFG'}";
   }
-  else {
-    POSIX::setsid() || snaked::die("Error running setsid: " . $!);
 
-    # let parent exit and clean up from /proc (or whatever)
-    sleep 1;
+  # set environment variable to specify that we want to cleanup
+  # already running snaked processes (this might be workaround
+  # for some FreeBSD or Proc::ProcessTable on FreeBSD bug,
+  # which caused the following:
+  #
+  # Thu Jun 24 10:29:31 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] clock moved back from Thu Jun 24 10:29:25 2010 to Thu Jun 24 10:29:24 2010, restarting
+  # Thu Jun 24 10:29:38 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] [24836] requested to restart
+  # Thu Jun 24 10:29:38 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] [24836] stopped
+  # Thu Jun 24 10:29:54 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] [WARN] [29246] snaked is already running: /usr/bin/perl /opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked --daemon --cfg /opt/home/monitor/ps-snake/etc/ps-farm/options/ps-snaked  [24836]
+  #
+  # [monitor@orange64 ~]$ uname -a
+  # FreeBSD orange64.yandex.ru 7.2-STABLE FreeBSD 7.2-STABLE #0 r199991M: Mon Feb  8 12:50:25 MSK 2010     root@distillatory.yandex.ru:/place/tmp/mk_pkg.wG1LSf1f/obj/place/GIT-repos/FreeBSD-7-r199991/sys/PRODUCTION  amd64
+  #
+  # Proc::ProcessTable 0.54
+  #
+  $ENV{'snaked_cleanup_already_running'} = 1;
 
-    POSIX::setsid() || snaked::do_log("Error running setsid: " . $!, {'stderr' => 1}) && die();
-    
-    $my_command_line = canonical_command_line($my_command_line, $my_path);
-
-    # append --cfg parameter if it's not specified
-    # (codepath is used only during first run
-    # when path to configuration was specified
-    # by environment variable)
-    if ($my_command_line !~ /--cfg $ENV{'PS_SNAKED_CFG'}/) {
-      $my_command_line .= " --cfg $ENV{'PS_SNAKED_CFG'}";
-    }
-
-    
-    # set environment variable to specify that we want to cleanup
-    # already running snaked processes (this might be workaround
-    # for some FreeBSD or Proc::ProcessTable on FreeBSD bug,
-    # which caused the following:
-    #
-    # Thu Jun 24 10:29:31 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] clock moved back from Thu Jun 24 10:29:25 2010 to Thu Jun 24 10:29:24 2010, restarting
-    # Thu Jun 24 10:29:38 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] [24836] requested to restart
-    # Thu Jun 24 10:29:38 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] [24836] stopped
-    # Thu Jun 24 10:29:54 2010 [/opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked] [WARN] [29246] snaked is already running: /usr/bin/perl /opt/home/monitor/ps-snake/usr/local/ps-snake/bin/snaked --daemon --cfg /opt/home/monitor/ps-snake/etc/ps-farm/options/ps-snaked  [24836]
-    #
-    # [monitor@orange64 ~]$ uname -a
-    # FreeBSD orange64.yandex.ru 7.2-STABLE FreeBSD 7.2-STABLE #0 r199991M: Mon Feb  8 12:50:25 MSK 2010     root@distillatory.yandex.ru:/place/tmp/mk_pkg.wG1LSf1f/obj/place/GIT-repos/FreeBSD-7-r199991/sys/PRODUCTION  amd64
-    #
-    # Proc::ProcessTable 0.54
-    #
-    $ENV{'snaked_cleanup_already_running'} = 1;
-
-    # next life
-    exec($my_command_line) || snaked::do_log("[$$] unable to exec $my_command_line", {'stderr' => 1}) && die();
-  }
-  exit(255);
+  Yandex::Tools::exec($my_command_line);
 }
 
 # spawn additional watchdogs slowly
 sub manage_watchdogs {
-  my $ptable = get_process_table();
+  my $ptable = Yandex::Tools::ProcessList::get_process_table();
 
   my $number_of_watchdogs = 0;
   # get the ps-snaked daemon process for which the watchdog is running
   my $my_process = undef;
   foreach my $p (@$ptable) {
     next unless $p->cmndline;
-    next if $p->cmndline !~ /$watchdog_match/ && $p->cmndline !~ /$watchdog_match1/;
+    next if !Yandex::Tools::matches_with_one_of_regexps($p->cmndline, [$watchdog_match, $watchdog_match1]);
+
     $number_of_watchdogs = $number_of_watchdogs + 1;
   }
 
@@ -1272,18 +873,18 @@ sub manage_watchdogs {
     my $t_cmdline = $my_command_line;
     $t_cmdline = canonical_command_line($t_cmdline, $my_path);
     $t_cmdline =~ s/\-\-daemon/\-\-watchdog/;
-    snaked::run_forked($t_cmdline);
+    Yandex::Tools::run_forked($t_cmdline);
   }
 }
 
 sub stop_watchdogs {
-  my $ptable = get_process_table();
+  my $ptable = Yandex::Tools::ProcessList::get_process_table();
 
   # get the ps-snaked daemon process for which the watchdog is running
   my $my_process = undef;
   foreach my $p (@$ptable) {
     next unless $p->cmndline;
-    next if $p->cmndline !~ /$watchdog_match/ && $p->cmndline !~ /$watchdog_match1/;
+    next if !Yandex::Tools::matches_with_one_of_regexps($p->cmndline, [$watchdog_match, $watchdog_match1]);
     
     kill (15, $p->pid);
   }
@@ -1312,7 +913,7 @@ sub run_watchdog {
     }
 
     if ($snaked::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
-      my $ptable = get_process_table();
+      my $ptable = Yandex::Tools::ProcessList::get_process_table();
 
       my $currently_running_watchdogs = 0;
 
@@ -1321,14 +922,14 @@ sub run_watchdog {
 
       foreach my $p (@$ptable) {
         my $p_cmndline;
-        my $r = code_may_fail(sub {$p_cmndline = $p->cmndline});
+        my $r = Yandex::Tools::ProcessList::code_may_fail(sub {$p_cmndline = $p->cmndline});
 
         next unless $p_cmndline;
 
-        if ($p_cmndline =~ /$watchdog_match/ || $p_cmndline =~ /$watchdog_match1/) {
+        if (Yandex::Tools::matches_with_one_of_regexps($p_cmndline, [$watchdog_match, $watchdog_match1])) {
           $currently_running_watchdogs = $currently_running_watchdogs + 1;
         }
-        elsif ($p_cmndline =~ /$daemon_match_cfg/ || $p_cmndline =~ /$daemon_match_cfg1/) {
+        elsif (Yandex::Tools::matches_with_one_of_regexps($p_cmndline, [$daemon_match_cfg, $daemon_match_cfg1])) {
           # at this point any snaked is selected
           # (even that which is starting
           # or running external command)
@@ -1336,9 +937,9 @@ sub run_watchdog {
           my $p_pid;
           my $p_ppid;
           my $p_pgrp;
-          $r = code_may_fail(sub {$p_pid = $p->pid});
-          $r = code_may_fail(sub {$p_ppid = $p->ppid});
-          $r = code_may_fail(sub {$p_pgrp = $p->pgrp});
+          $r = Yandex::Tools::ProcessList::code_may_fail(sub {$p_pid = $p->pid});
+          $r = Yandex::Tools::ProcessList::code_may_fail(sub {$p_ppid = $p->ppid});
+          $r = Yandex::Tools::ProcessList::code_may_fail(sub {$p_pgrp = $p->pgrp});
 
           next unless $p_pid && $p_ppid && $p_pgrp;
 
@@ -1370,7 +971,7 @@ sub run_watchdog {
           sleep(4 + 4 * int(rand($currently_running_watchdogs)));
         }
         else {
-          snaked::do_log("watchdog [$$]: snaked not found (killed?), respawning");
+          Yandex::Tools::do_log("watchdog [$$]: snaked not found (killed?), respawning");
           # replace --watchdog with --daemon
           my $t_cmdline = $my_command_line;
           $t_cmdline =~ s/\-\-watchdog/\-\-daemon/;
@@ -1416,10 +1017,57 @@ sub run_watchdog {
   exit (255);
 }
 
-snaked::read_cmdline();
+sub get_cfg_path {
+  if (!$ENV{'PS_SNAKED_CFG'}) {
+    if (Yandex::Tools::defined_cmdline_param('cfg')) {
+      $ENV{'PS_SNAKED_CFG'} = Yandex::Tools::get_cmdline_param('cfg');
 
-if (defined($snaked::cmd_opts->{'stop'})) {
-  my $d = get_other_daemon_process();
+      if (! -d "$ENV{'PS_SNAKED_CFG'}") {
+        die "Configuration does not exist: $ENV{'PS_SNAKED_CFG'}\n";
+      }
+    }
+    else {
+      $ENV{'PS_SNAKED_CFG'} = $ENV{'MY_ETC'};
+
+      if (! -d $ENV{'PS_SNAKED_CFG'}) {
+        $ENV{'PS_SNAKED_CFG'} = ($ENV{'MY_ROOT'} eq "/" ? "" : $ENV{'MY_ROOT'}) .
+          "/etc/ps-farm/options/ps-snaked";
+      }
+      if (! -d $ENV{'PS_SNAKED_CFG'} && -d "/etc/ps-farm/options/ps-snaked") {
+        $ENV{'PS_SNAKED_CFG'} = "/etc/ps-farm/options/ps-snaked";
+      }
+      if (! -d $ENV{'PS_SNAKED_CFG'} && -d "/etc/snaked") {
+        $ENV{'PS_SNAKED_CFG'} = "/etc/snaked";
+      }
+    }
+  }
+
+  if (! -d "$ENV{'PS_SNAKED_CFG'}") {
+    $ENV{'PS_SNAKED_CFG'} = undef;
+  }
+  else {
+    if (!$daemon_regexp_configured) {
+      $daemon_match_cfg = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+(daemon|debug).+cfg.+$ENV{'PS_SNAKED_CFG'}/;
+      $daemon_match_cfg1 = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+cfg.+$ENV{'PS_SNAKED_CFG'}.+(daemon|debug)/;
+      $daemon_match_nocfg = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+(daemon|debug)/;
+      $watchdog_match = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+(watchdog).+cfg.+$ENV{'PS_SNAKED_CFG'}/;
+      $watchdog_match1 = qr/^([^\s]+perl[^\s]*[\s]+|)[^\s]+(ps-)?snaked.+cfg.+$ENV{'PS_SNAKED_CFG'}.+(watchdog)/;
+      $daemon_regexp_configured = 1;
+    }
+  }
+
+  return $ENV{'PS_SNAKED_CFG'};
+}
+
+Yandex::Tools::read_cmdline();
+get_cfg_path();
+Yandex::Tools::ProcessList::set_options({
+  'daemon_match' => [$daemon_match_cfg, $daemon_match_cfg1],
+  'daemon_match_startup' => [$daemon_match_nocfg],
+  });
+
+if (Yandex::Tools::defined_cmdline_param('stop')) {
+  my $d = Yandex::Tools::ProcessList::get_other_daemon_process();
   if ($d) {
     print "requesting " . $d->pid() . " [" . $d->cmndline . "] to stop\n";
     kill (15, $d->pid);
@@ -1429,8 +1077,8 @@ if (defined($snaked::cmd_opts->{'stop'})) {
   }
   exit 0;
 }
-elsif (defined($snaked::cmd_opts->{'configure'})) {
-  my $d = get_other_daemon_process();
+elsif (Yandex::Tools::defined_cmdline_param('configure')) {
+  my $d = Yandex::Tools::ProcessList::get_other_daemon_process();
   if ($d) {
     print "requesting " . $d->pid() . " [" . $d->cmndline . "] to refresh configuration\n";
     kill ("HUP", $d->pid)
@@ -1440,10 +1088,10 @@ elsif (defined($snaked::cmd_opts->{'configure'})) {
   }
   exit 0;
 }
-elsif (defined($snaked::cmd_opts->{'restart'})) {
-  my $d = get_other_daemon_process();
+elsif (Yandex::Tools::defined_cmdline_param('restart')) {
+  my $d = Yandex::Tools::ProcessList::get_other_daemon_process();
   if ($d) {
-    if (!defined($snaked::cmd_opts->{'only-errors'})) {
+    if (!Yandex::Tools::defined_cmdline_param('only-errors')) {
       print "requesting " . $d->pid() . " [" . $d->cmndline . "] to restart\n";
     }
     kill ("USR2", $d->pid)
@@ -1453,8 +1101,8 @@ elsif (defined($snaked::cmd_opts->{'restart'})) {
   }
   exit 0;
 }
-elsif (defined($snaked::cmd_opts->{'status'})) {
-  my $d = get_other_daemon_process();
+elsif (Yandex::Tools::defined_cmdline_param('status')) {
+  my $d = Yandex::Tools::ProcessList::get_other_daemon_process();
   if ($d) {
     print "snaked is running as pid " . $d->pid . ". command line [" . $d->cmndline . "]\n";
   }
@@ -1463,7 +1111,7 @@ elsif (defined($snaked::cmd_opts->{'status'})) {
   }
   exit 0;
 }
-elsif (defined($snaked::cmd_opts->{'show-jobs'})) {
+elsif (Yandex::Tools::defined_cmdline_param('show-jobs')) {
   refreshOptions($ENV{'PS_SNAKED_CFG'}, {'keep_disabled' => 1});
   print "    global options\n";
   foreach my $k (sort keys %{$snaked::Daemon::runtime->{'config'}}) {
@@ -1487,36 +1135,35 @@ elsif (defined($snaked::cmd_opts->{'show-jobs'})) {
   }
   exit 0;
 }
-elsif (defined($snaked::cmd_opts->{'version'})) {
+elsif (Yandex::Tools::defined_cmdline_param('version')) {
   print "$version\n";
   exit 0;
 }
 
-my $i_am_watchdog = defined($snaked::cmd_opts->{'watchdog'});
+my $i_am_watchdog = Yandex::Tools::defined_cmdline_param('watchdog');
 
-if (!defined($snaked::cmd_opts->{'daemon'}) && !$snaked::debug && !$i_am_watchdog) {
+if (!Yandex::Tools::defined_cmdline_param('daemon') && !Yandex::Tools::defined_cmdline_param('debug') && !$i_am_watchdog) {
   help();
   exit 0;
 }
 
-refreshOptions($ENV{'PS_SNAKED_CFG'}, {'no-jobs' => $i_am_watchdog});
-my $t = $snaked::LOG->{'filename'};
-if (!snaked::can_log()) {
-  snaked::warn("Can not write to log file [$t], check permissions; logging to STDERR");
+if (!get_cfg_path()) {
+  die "no configuration found (default /etc/snaked)";
 }
+refreshOptions($ENV{'PS_SNAKED_CFG'}, {'no-jobs' => $i_am_watchdog});
 if (config_value('log_errors')) {
-  if (!snaked::can_write(config_value('log_errors'))) {
-    snaked::warn("Can not write to log_errors file [" . config_value('log_errors') .
+  if (!Yandex::Tools::can_write(config_value('log_errors'))) {
+    Yandex::Tools::warn("Can not write to log_errors file [" . config_value('log_errors') .
       "], check permissions.");
     delete($snaked::Daemon::runtime->{'config'}->{'log_errors'});
   }
 }
 
 if (!$i_am_watchdog) {
-  my $d = get_other_daemon_process();
+  my $d = Yandex::Tools::ProcessList::get_other_daemon_process();
   if ($d) {
     if (!$ENV{'snaked_cleanup_already_running'}) {
-      snaked::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "]");
+      Yandex::Tools::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "]");
       exit 1;
     }
     else {
@@ -1524,27 +1171,27 @@ if (!$i_am_watchdog) {
       $ENV{'snaked_cleanup_already_running'} = undef;
       kill(-9, $d->pid);
       sleep 3;
-      $d = get_other_daemon_process({'refresh_startup_processes' => 1});
+      $d = Yandex::Tools::ProcessList::get_other_daemon_process({'refresh_startup_processes' => 1});
       if ($d) {
-        snaked::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "] and doesn't stop on KILL signal");
+        Yandex::Tools::warn("[$$] snaked is already running: " . $d->cmndline . " ["  . $d->pid . "] and doesn't stop on KILL signal");
         exit 1;
       }
       else {
-        snaked::warn("[$$] killed previously running snaked: " . $previous_snaked->cmndline . " ["  . $previous_snaked->pid . "], continuing to start");
+        Yandex::Tools::warn("[$$] killed previously running snaked: " . $previous_snaked->cmndline . " ["  . $previous_snaked->pid . "], continuing to start");
       }
     }
   }
 }
 
-($my_path, $my_command_line) = get_my_path_commandline();
+($my_path, $my_command_line) = Yandex::Tools::ProcessList::get_my_path_commandline();
 
-snaked::debug("my_path: $my_path");
-snaked::debug("my_command_line: $my_command_line");
+Yandex::Tools::debug("my_path: $my_path");
+Yandex::Tools::debug("my_command_line: $my_command_line");
 
 print "starting snaked daemon for $ENV{'PS_SNAKED_CFG'}\n"
   unless $i_am_watchdog;
 
-if (defined($snaked::cmd_opts->{'daemon'}) || $i_am_watchdog) {
+if (Yandex::Tools::defined_cmdline_param('daemon') || $i_am_watchdog) {
   # restart daemon using its full pathname and config path
   # if it was not started like this (so we could distinguish
   # between daemons by their locations)
@@ -1552,14 +1199,7 @@ if (defined($snaked::cmd_opts->{'daemon'}) || $i_am_watchdog) {
     sigUSR2_handler();
   }
 
-  # daemonize
-  chdir ('/') || die "unable chdir to /: $!";
-  open(STDIN, "/dev/null") || die("unable to read from /dev/null: $!");
-  open(STDOUT, "dev/null") || die("unable to write to /dev/null: $!");
-  defined(my $pid = fork) || die "Can't fork: $!";
-  exit if $pid;
-  POSIX::setsid() || die("Error running setsid: " . $!);
-  open(STDERR, "/dev/null") || die("unable to write to /dev/null: $!");
+  Yandex::Tools::daemonize();
 
   # run watchdog (except for when snaked
   # would be restarted right after start)
@@ -1568,18 +1208,18 @@ if (defined($snaked::cmd_opts->{'daemon'}) || $i_am_watchdog) {
     exit;
   }
 }
-elsif ($snaked::debug) {
+elsif ($Yandex::Tools::debug) {
   # stay in foreground
 }
 
-snaked::do_log("[$$] started");
+Yandex::Tools::do_log("[$$] started");
 
 if ($snaked::Daemon::runtime->{'config'}->{'pidfile'} &&
   !$snaked::Daemon::runtime->{'flags'}->{'restart'} &&
   !$i_am_watchdog) {
 
-  if (snaked::can_write($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})) {
-    snaked::write_file_option($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'}, $$);
+  if (Yandex::Tools::can_write($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})) {
+    Yandex::Tools::write_file_option($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'}, $$);
   }
 }
 
@@ -1595,7 +1235,7 @@ while (1) {
 
   # clock moved back -- restarting
   if ($previous_now && $current_now && ($previous_now > $current_now)) {
-    snaked::do_log("clock moved back from " . localtime($previous_now) . " to " . localtime($current_now) . ", restarting");
+    Yandex::Tools::do_log("clock moved back from " . localtime($previous_now) . " to " . localtime($current_now) . ", restarting");
     sigUSR2_handler();
   }
 
@@ -1607,7 +1247,7 @@ while (1) {
   }
 
   my $have_active_children = values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}};
-  snaked::debug("active children:") if $have_active_children;
+  Yandex::Tools::debug("active children:") if $have_active_children;
 
   # check status of all children removing those which finished
   foreach my $v (values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
@@ -1632,13 +1272,13 @@ while (1) {
 
       do_err_log("killed long running (". ($now - $v->{'borntime'}) .
         " seconds) process [$v->{'pid'}] [$v->{'type'}]", {"stderr" => 1});
-      snaked::do_log("killed long running (". ($now - $v->{'borntime'}) .
+      Yandex::Tools::do_log("killed long running (". ($now - $v->{'borntime'}) .
         " seconds) process [$v->{'pid'}] [$v->{'type'}]", {"stderr" => 1});
     }
 
     my $waitpid = waitpid($v->{'pid'}, WNOHANG);
     
-    snaked::debug("\tchild [$v->{'pid'}] [$v->{'type'}] [" . ($v->{'id'} ? $v->{'id'} : "") . "]: $waitpid;".
+    Yandex::Tools::debug("\tchild [$v->{'pid'}] [$v->{'type'}] [" . ($v->{'id'} ? $v->{'id'} : "") . "]: $waitpid;".
       " running " . (time() - $v->{'borntime'}) . " seconds");
 
     manage_child($v->{'pid'});
@@ -1652,7 +1292,7 @@ while (1) {
     $snaked::Daemon::runtime->{'usec_2refresh_configuration'} < 1) {
     if (!have_children()) {
       if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'}) {
-        snaked::do_log("requested to reread configuration, rereading");
+        Yandex::Tools::do_log("requested to reread configuration, rereading");
       }
       refreshOptions($ENV{'PS_SNAKED_CFG'});
       $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 0;
@@ -1661,19 +1301,19 @@ while (1) {
     else {
       if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} &&
         !$snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'}) {
-        snaked::do_log("requested to reread configuration, waiting for children to stop");
+        Yandex::Tools::do_log("requested to reread configuration, waiting for children to stop");
         $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 1;
       }
     }
   }
   if ($snaked::Daemon::runtime->{'flags'}->{'restart'}) {
-    if ($snaked::debug) {
-      snaked::warn("unable to restart attached daemon");
+    if ($Yandex::Tools::debug) {
+      Yandex::Tools::warn("unable to restart attached daemon");
       $snaked::Daemon::runtime->{'flags'}->{'restart'} = 0;
     }
     else {
       if (!$snaked::Daemon::runtime->{'flags'}->{'stop'}) {
-        snaked::do_log("[$$] requested to restart");
+        Yandex::Tools::do_log("[$$] requested to restart");
         $snaked::Daemon::runtime->{'flags'}->{'stop'} = 1;
       }
     }
@@ -1714,7 +1354,7 @@ while (1) {
 
           next if $do_not_run;
 
-          snaked::debug("starting [$task_name]");
+          Yandex::Tools::debug("starting [$task_name]");
           add_child($task_name);
         }
       }
@@ -1729,12 +1369,12 @@ while (1) {
             if (!$child_e->{'startup_sleep'}) {
               $child_e->{'startup_sleep'} = int(rand($task->{'start_random_sleep'}));
               $child_e->{'startup_sleep_started'} = $now;
-              snaked::debug("task [$task_name] random sleep [$child_e->{'startup_sleep'}]");
+              Yandex::Tools::debug("task [$task_name] random sleep [$child_e->{'startup_sleep'}]");
             }
 
             if ($now - $child_e->{'startup_sleep_started'} > $child_e->{'startup_sleep'}) {
               $child_e->{'startup_sleep_finished'} = $now;
-              snaked::debug("task [$task_name] random sleep finished");
+              Yandex::Tools::debug("task [$task_name] random sleep finished");
             }
           }
           else {
@@ -1769,14 +1409,14 @@ while (1) {
     # wait for children to exit and exit then
     if (have_children()) {
       for_each_child ({'stop_now' => 1});
-      snaked::debug("waiting for children to exit");
+      Yandex::Tools::debug("waiting for children to exit");
       sleep 1;
     }
     else {
       unlink($snaked::Daemon::runtime->{'config'}->{'pidfile'}->{'value'})
         if $snaked::Daemon::runtime->{'config'}->{'pidfile'};
       
-      snaked::do_log("[$$] stopped");
+      Yandex::Tools::do_log("[$$] stopped");
 
       # do not restart watchdogs on restart as they will try
       # to start snaked if restart fails (which should not happen
@@ -1797,8 +1437,8 @@ while (1) {
     }
   }
 
-  if ($snaked::debug) {
-    snaked::debug("-");
+  if ($Yandex::Tools::debug) {
+    Yandex::Tools::debug("-");
     sleep (1);
   }
   else {
@@ -1819,273 +1459,3 @@ while (1) {
 # yes i know this is the way
 # to the world of endless may
 exit(255);
-
-__END__
-
-=head1 NAME
-
-snaked - cron as it should be.
-
-=head1 SYNOPSIS
-
-  # import old cron jobs (TO BE IMPLEMENTED)
-  snaked --import-crontabs
-
-  # check which jobs are configured
-  snaked --show-jobs
-
-  # rock with snake
-  snaked --daemon
-
-  # (and do not forget to stop old cron
-  # so your jobs are not run twice)
-
-=head1 DESCRIPTION
-
-B<snaked> is a job scheduler, just like cron,
-which has several unique features making it
-much more flexible and useful than any other
-cron implementation.
-
-It is heavily tested on Linux and FreeBSD
-but might (and hopefully with your help will)
-be run on any Perl + POSIX compliant system.
-
-=head2 limit job execution time
-
-You can choose to configure the maximum limit of time
-for each job to finish. If job doesn't finish in time
-it is killed. The limit is independently configurable
-for each job. Forget about lockf, ps -ef | grep -v grep
-and cron jobs being run twice and more times concurrently.
-
-You can also configure the upper limit of execution time
-of any job of the given snaked instance. This global limit
-is checked independently of the individual
-job execution time limits.
-
-=head2 unique job id and job dependencies
-
-Each snaked job has its unique job identifier
-which is used to configure job dependencies:
-for any job you can specify other jobs
-(addressed by their identifiers) which
-shouldn't be run with this job concurrently.
-
-So if job A is being executed and time comes
-to start job B which is configured as conflicting
-with job A, then the start of job B is postponed
-until job A is finished.
-
-=head2 more often than once a minute
-
-snaked allows jobs to be run more often than once a minute.
-
-Actually snaked supports two execution schedule formats:
-old cron format with not less than a minute time resolution
-and snaked job schedule format which specifies how often
-the jobs is run in seconds, making it possible to run job
-even once a second!
-
-=head1 CONFIGURATION EXAMPLE
-
-snaked configuration is a directory which contains
-global instance options (each option in separate file)
-and associated job definitions where job definition
-is also a directory with each job option
-stored in a separate file:
-
-  .
-  |-- admin_email
-  |-- jobs
-  |   |-- every_hour
-  |   |   |-- cmd
-  |   |   `-- execution_schedule
-  |   |-- every_ten_seconds
-  |   |   |-- cmd
-  |   |   `-- execution_interval
-  |   `-- fast_job
-  |       |-- cmd
-  |       |-- conflicts
-  |       `-- execution_interval
-  `-- log
-
-Above shown configuration defines admin_email
-for the snaked instance (optional, defaults to root)
-and log file path (optional, defaults to /tmp/snaked.log):
-
-  testing18:/etc/snaked# cat admin_email
-  root
-  testing18:/etc/snaked# cat log
-  /var/log/snaked/snaked.log
-
-There are three jobs named every_hour, every_ten_seconds
-and fast_job. All of them contain cmd file -- an executable
-which is run by snaked (this can be any executable
-allowed by underlying operating system):
-
-  testing18:/etc/snaked/jobs/every_hour# ls -l cmd
-  -rwxr-xr-x 1 root root 0 2010-07-07 00:24 cmd
-  testing18:/etc/snaked/jobs/every_hour# file cmd
-  cmd: POSIX shell script text executable
-
-First job, every_hour, has a parameter execution_schedule
-which is an old cron schedule example (parsed by L<Schedule::Cron::Events>):
-
-  testing18:/etc/snaked/jobs/every_hour# cat execution_schedule
-  0 * * * *
-
-Two other jobs use snaked execution_interval schedule,
-specifying that every_ten_seconds job should be run
-once in ten seconds, and fast_job should be run
-once in every second.
-
-  testing18:/etc/snaked/jobs/every_ten_seconds# cat execution_interval
-  10
-  testing18:/etc/snaked/jobs/fast_job# cat execution_interval
-  1
-
-To make it a bit more explanatory we've defined conflicts option
-for fast_job which specifies that fast_job should not be run
-if every_ten_seconds is running:
-
-  testing18:/etc/snaked/jobs/fast_job# cat conflicts
-  every_ten_seconds
-
-Which translates to "try to run 'fast_job' as often as once a second,
-but wait if 'every_ten_seconds' job is running".
-
-=head1 DAEMON OPTIONS
-
-=over 4
-
-=item admin_email
-
-Optional. Where to send emails about failing jobs. Defaults to root.
-
-=item log
-
-Optional. Name of the log filename which holds all the log messages
-including informational and error messages. Defaults to /tmp/snaked.log.
-
-=item log_errors
-
-Optional. Name of the log filename used only for error messages.
-Defaults to nothing, turning off separate error logging.
-
-=item log_rotate_size
-
-Optional. Size of the log file after which it is rotated.
-Defaults to 10 MB.
-
-=item log_rotate_keep_copies
-
-Optional. Number of rotated log files to preserve.
-Defaults to 2.
-
-=item max_job_time
-
-Optional. Specifies maximum exeuction time limit for all the jobs.
-Defaults to 2 hours.
-
-=item pidfile
-
-Optional. Filename of the pidfile where snaked stores
-the pid of its main process. Defaults to nothing,
-which does not generate any pidfile.
-
-=back
-
-=head1 JOB OPTIONS
-
-=over 4
-
-=item admin_email
-
-Optional. Where toe send emails about failures of this job.
-Defaults to global admin_email option (and overrides it). 
-
-=item cmd
-
-Mandatory. Executable with correct file permissions (executable bit on)
-which is allowed by underlying operating system. Can be shell script or binary.
-
-=item execution_interval, execution_schedule
-
-Only one parameter, execution_interval or execution_schedule, is allowed
-and is mandatory for one job. execution_interval specifies number of seconds
-(positive integer) between invocations of cmd. execution_schedule specifies
-standard cron format schedule (first five fields) for the job.
-
-=item execution_timeout
-
-Optional. Specifies time limit for the job, in seconds.
-Defaults to nothing, turning time limit off.
-
-=item kill_timeout
-
-Optional. Specifies time in seconds between TERM and KILL signals
-sent to the job when snaked needs to stop the job (when snaked
-stop or restarts, when job runs too long). Defaults to 60 seconds.
-
-=item notification_interval
-
-Optional. Time period in seconds. Job failure emails are not sent
-more often than this time period. First email is sent after
-first time period of constant failures. This option is used
-to suppress emails about accidental job failures. Defaults to 0,
-which turns the feature off (delivers email on every job failure).
-
-=item start_random_sleep
-
-Optional. Time period in seconds which specifoes random
-first run shift in time for the job. Defaults to 0,
-which turns the feature off.
-
-=item conflicts
-
-Optional. Space/line separated list of job identifiers
-which should not be run while this job is run. If any
-job from this list is currently being executed
-then the job owning the option will not be executed.
-Defaults to nothing, allowing the job to be run
-independently of the status of any other job.
-
-snaked organizes conflicting jobs into job groups,
-running every job from the job group one by one
-(if the time for the job has come). This guarantees
-that every conflicting job is run from time to time
-though its start time might be shifted because of
-waiting for the conflicting jobs.
-
-=back
-
-=head1 CREDITS
-
-Thank you to Yandex team (in alphabetic order):
-
-  Denis Barov
-  Maxim Dementyev
-  Eugene Fedotov
-  Andrey Grunau
-  Andrey Ignatov
-  Dmitry Parfenov
-  Alexey Simakov
-  Julie S Ukhlicheva
-  Anton Ustyugov
-  Andrey Zonov
-
-for their bug reports, suggestions and contributions.
-
-=head1 AUTHORS
-
-Petya Kohts E<lt>petya@kohts.ruE<gt>
-
-=head1 COPYRIGHT
-
-Copyright 2009 - 2010 Petya Kohts.
-
-This program is free software; you can redistribute it and/or
-modify it under the same terms as Perl itself.
-
-=cut

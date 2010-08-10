@@ -1,4 +1,7 @@
-0.03
+0.05
+  - moved library functions into Yandex::Tools
+
+0.04
   - correct dependency (Schedule::Cron::Events)
 
 0.03
