@@ -8,6 +8,9 @@
 #
 
 BEGIN {
+  # unbuffered output
+  $| = 1;
+
   use Cwd;
   use FindBin;
 
@@ -23,7 +26,7 @@ BEGIN {
     $ENV{'MY_LIB'} = Cwd::abs_path("$ENV{'MY_BIN'}/lib");
   }
 
-  $ENV{'MY_ETC'} = Cwd::abs_path("$ENV{'MY_BIN'}/../etc");
+  $ENV{'MY_ETC'} = "/etc/snaked";
   $ENV{'MY_ROOT'} = Cwd::abs_path("$ENV{'MY_BIN'}/../../../..");
 
   if (!$ENV{'PS_SNAKED_LIB'}) {
@@ -50,13 +53,35 @@ use IO::Handle; # autoflush
 use Socket; # socketpair
 use Fcntl;
 
-my $version = '($Id: snaked 4283 2010-08-10 11:02:21Z kohts $)';
+my $version = '($Id: snaked 4815 2010-12-30 16:31:59Z kohts $)';
 
 my ($daemon_regexp_configured, $daemon_match_cfg, $daemon_match_cfg1, $daemon_match_nocfg, $watchdog_match, $watchdog_match1);
 
 my $my_path;
 my $my_command_line;
 my $watchdogs2maintain = 1;
+
+sub watchdog_check_timeout {
+  my ($opts) = @_;
+  
+  my $average_number_of_processes = 50 * 2; # 50 is average
+
+  $opts = {} unless $opts;
+  $opts->{'watchdogs2maintain'} = 0
+    unless $watchdogs2maintain;
+  $opts->{'number_of_processes'} = $average_number_of_processes
+    unless $opts->{'number_of_processes'};
+
+  my $timeout_step = ($opts->{'watchdogs2maintain'} + 1) * 2 * 2000000; # 8 secs
+
+  my $k =
+    int($opts->{'number_of_processes'} / $average_number_of_processes) *
+    2 *
+    $opts->{'watchdogs2maintain'} *
+    1000000; # microseconds
+
+  return $timeout_step + $k;
+}
 
 $snaked::Daemon::runtime = {
   "type" => "master",
@@ -67,17 +92,13 @@ $snaked::Daemon::runtime = {
     },
 
   "children" => {},
-  "children_cache" => {},
 
   "usec_2check_watchdog" => 0,
   "usec_2refresh_configuration" => 0,
   
   "start_time" => time(),
 
-  "current_tasks" => {},
-
-  "tasks" => {},
-  "task_groups" => {},
+  "tasks" => {}, # mixed configuration and runtime task options/parameters
 
   "config" => {},
 
@@ -95,7 +116,6 @@ sub sigTERM_handler {
 sub sigHUP_handler {
   if ($snaked::Daemon::runtime->{'type'} eq 'master') {
     $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 1;
-    $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 0;
   }
 }
 sub sigUSR1_handler {
@@ -108,6 +128,8 @@ sub sigUSR2_handler {
     }
   }
 }
+
+#Yandex::Tools::disable_all_signals();
 
 $SIG{'TERM'} = \&sigTERM_handler;
 $SIG{'HUP'} = \&sigHUP_handler;
@@ -126,11 +148,11 @@ sub help() {
         --debug     -- run in foreground with debug output
 
       runtime control:
-        --restart   -- schedule restart for currently running daemon
-                       (valid only for backgrounded daemon)
-        --configure -- schedule reread of configuration
-        --status    -- is there daemon running?
-        --stop      -- schedule stop for currently running daemon
+        --restart [--wait] -- schedule restart for currently running daemon
+                              (valid only for backgrounded daemon)
+        --configure        -- schedule reread of configuration
+        --status           -- is there daemon running?
+        --stop [--wait]    -- schedule stop for currently running daemon
 
       configuration:
         --show-jobs   -- show configured daemon jobs
@@ -247,12 +269,12 @@ sub run_task {
 }
 
 sub add_child {
-  my ($type, $id, $opts) = @_;
+  my ($task_name, $opts) = @_;
 
   $opts = {} unless $opts;
 
-  Yandex::Tools::die ("Programmer error: add_child expects at least child type")
-    unless $type;
+  Yandex::Tools::die ("Programmer error: add_child expects at least child name")
+    unless $task_name;
 
   my $child_socket;
   my $parent_socket;
@@ -276,18 +298,17 @@ sub add_child {
 
     my $child = {
       'pid' => $pid,
-      'type' => $type,
+      'name' => $task_name,
       'borntime' => time(),
       'killtime' => 0,
-      'id' => $id,
       'child_socket' => $child_socket,
       'output' => '',
       };
 
     $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid} = $child;
-    $snaked::Daemon::runtime->{'children'}->{'by_type'}->{$type}->{$pid} = $child;
+    $snaked::Daemon::runtime->{'children'}->{'by_name'}->{$task_name}->{$pid} = $child;
 
-    child_started($type);
+    child_started($task_name);
   }
   else {
     Yandex::Tools::die("cannot fork: $!") unless defined $pid;
@@ -295,7 +316,7 @@ sub add_child {
     $snaked::Daemon::runtime->{'type'} = "child";
     close $child_socket;
 
-    my $r = run_task($type);
+    my $r = run_task($task_name);
 
     while ($r =~ /([^\r\n]+?)([\r\n]|$)/sg) {
       my $s = $1;
@@ -309,52 +330,29 @@ sub add_child {
   }
 }
 
-sub get_child_cache {
-  my ($name) = @_;
-
-  if (!defined($snaked::Daemon::runtime->{'children_cache'}->{$name})) {
-    $snaked::Daemon::runtime->{'children_cache'}->{$name} = {
-      'laststart' => 0
-      };
-  }
-  return $snaked::Daemon::runtime->{'children_cache'}->{$name};
-}
-
 sub find_child {
-  my ($id, $type) = @_;
-
-  foreach my $v (values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
-    
-    if ($id) {
-      # search for child by its id (and type if specified)
-
-      if ($v->{'id'} && $v->{'id'} eq $id &&
-        ($type && $v->{'type'} eq $type || !$type)
-        ) {
-
-        return $v;
-      }
-    }
-    elsif ($type) {
-      # returns first child of specified type
-      if ($v->{'type'} eq $type) {
-        return $v;
-      }
-    }
+  my ($name) = @_;
+  if (!$snaked::Daemon::runtime->{'children'}->{'by_name'}->{$name}) {
+    return undef;
   }
-  
-  return undef;
+
+  # future use: several children for one task (not implemented now)
+  return scalar(keys %{$snaked::Daemon::runtime->{'children'}->{'by_name'}->{$name}});
 }
 
 sub child_started {
   my ($name) = @_;
-  $snaked::Daemon::runtime->{'children_cache'}->{$name}->{'laststart'} = time();
+  my $task = $snaked::Daemon::runtime->{'tasks'}->{$name};
+  $task->{'last_start'} = time();
+  if ($task->{'next_run'}) {
+    $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
+  }
 }
 
 sub child_finished {
   my ($name, $output) = @_;
-  $snaked::Daemon::runtime->{'children_cache'}->{$name}->{'lastfinish'} = time();
-
+  my $task = $snaked::Daemon::runtime->{'tasks'}->{$name};
+  $task->{'last_finish'} = time();
   if ($output) {
     do_err_log("[$name]: $output");
     Yandex::Tools::do_log("[$name]: $output");
@@ -385,7 +383,7 @@ sub remove_child {
     if waitpid($pid,WNOHANG) ne -1;
 
   my $child = $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
-  my $task = $snaked::Daemon::runtime->{'tasks'}->{$child->{'type'}};
+  my $task = $snaked::Daemon::runtime->{'tasks'}->{$child->{'name'}};
 
   close($child->{'child_socket'});
 
@@ -415,12 +413,9 @@ sub remove_child {
     delete($task->{'runtime'}->{'first_failure_time'});
   }
 
-  child_finished($child->{'type'}, $child->{'output'});
+  child_finished($child->{'name'}, $child->{'output'});
 
-  my $child_group = find_group_by_task(undef, $child->{'type'});
-  delete $snaked::Daemon::runtime->{'current_tasks'}->{$child_group}->{$child->{'type'}};
-
-  delete $snaked::Daemon::runtime->{'children'}->{'by_type'}->{$child->{'type'}}->{$pid};
+  delete $snaked::Daemon::runtime->{'children'}->{'by_name'}->{$child->{'name'}}->{$pid};
   delete $snaked::Daemon::runtime->{'children'}->{'by_pid'}->{$pid};
 }
 
@@ -445,120 +440,127 @@ sub for_each_child {
   }
 }
 
-sub find_group_by_task {
-  my ($task_groups, $task_name) = @_;
-  $task_groups = $snaked::Daemon::runtime->{'task_groups'} unless $task_groups;
+# spawn tasks which should and could be spawned
+#
+sub run_scheduling {
 
-  foreach my $tg (keys %{$task_groups}) {
-    if ($task_groups->{$tg}->{$task_name}) {
-      return $tg;
+  # all configured tasks (by name)
+  my $tasks = $snaked::Daemon::runtime->{'tasks'};
+
+  # configured tasks which should be run (by name)
+  my $should_be_run_tasks = {};
+
+  # configured tasks which should and could be run now (by last_start time)
+  my $could_be_run_tasks = {};
+
+
+  # choose tasks which should be run
+  foreach my $task_name (keys %{$tasks}) {
+    my $task = $tasks->{$task_name};
+
+    # totally skip disabled tasks
+    next if defined($task->{'disabled'});
+    
+    my $now = time();
+
+    # postpone tasks which have start_random_sleep configured
+    #
+    if ($task->{'start_random_sleep'} && !$task->{'startup_sleep_finished'}) {
+      if (!$task->{'startup_sleep'}) {
+        $task->{'startup_sleep'} = int(rand($task->{'start_random_sleep'}));
+        $task->{'startup_sleep_started'} = $now;
+        Yandex::Tools::debug("task [$task_name] random sleep [$task->{'startup_sleep'}]");
+      }
+
+      if ($now - $task->{'startup_sleep_started'} > $task->{'startup_sleep'}) {
+        $task->{'startup_sleep_finished'} = $now;
+        Yandex::Tools::debug("task [$task_name] random sleep finished");
+      }
+    }
+    else {
+      # random startup sleep not configured for the task
+      $task->{'startup_sleep_finished'} = $now;
+    }
+
+    # skip tasks which are sleeping their random start-up time
+    #
+    next unless $task->{'startup_sleep_finished'};
+
+    # choose tasks which should be run (for which the time has come)
+    #
+    if (!$task->{'last_finish'}) {
+      $should_be_run_tasks->{$task_name} = $task;
+    }
+    else {
+      if ($task->{'execution_interval'}) {
+        if ($task->{'last_start'} + $task->{'execution_interval'} <= $now) {
+          $should_be_run_tasks->{$task_name} = $task;
+        }
+      }
+      elsif ($task->{'next_run'} && $task->{'next_run'} <= $now) {
+        $should_be_run_tasks->{$task_name} = $task;
+      }
     }
   }
 
-  return undef;
-}
+  # for each task which should be run check
+  #   1) that it's not already running
+  #   2) that it's possible to run it (dependencies)
+  #
+  foreach my $task_name (keys %{$should_be_run_tasks}) {
+    my $task = $should_be_run_tasks->{$task_name};
 
-# break $snaked::Daemon::Runtime->{'tasks'}
-# (configured in /etc/ps-farm/options/ps-snaked/jobs)
-# into task groups by dependency
-#
-sub prepare_task_groups {
-  my $task_groups = $snaked::Daemon::runtime->{'task_groups'};
-  my $tasks = $snaked::Daemon::runtime->{'tasks'};
-
-  foreach my $task_name (keys %{$tasks}) {
-    my $task = $tasks->{$task_name};
+    # skips tasks which are already running
+    next if find_child($task_name);
     
-    my $attach_task_to_group = sub {
-      my ($group_name, $task_name) = @_;
+    # remove tasks which were marked to be removed
+    # when the time comes to execute them knowing
+    # that it does not run currently (see above)
+    if ($task->{'TO_BE_REMOVED'}) {
+      delete $snaked::Daemon::runtime->{'tasks'}->{$task_name};
+      next;
+    }
 
-      foreach my $tg (keys %{$task_groups}) {
-        if ($tg eq $group_name) {
-          $task_groups->{$tg}->{$task_name} = 1;
-        }
-        elsif ($task_groups->{$tg}->{$task_name}) {
-          delete ($task_groups->{$tg}->{$task_name});
-        }
-      }
-    };
-
-    # prepare task groups by dependencies
-
-    # attach task to the group where
-    # its conflicting tasks are
+    # check that no conflicting tasks are running
     #
-    if ($task->{'conflicts'}) {
-      my $conflicting_groups = {};
-
-      foreach my $c_task (@{$task->{'conflicts'}}) {
-        my $conflicting_tg = find_group_by_task($task_groups, $c_task);
-
-        if ($conflicting_tg) {
-          $conflicting_groups->{$conflicting_tg} = 1;
-        }
-      }
-
-      if (scalar(keys %{$conflicting_groups}) > 1) {
-        # found conflicting tasks in different task groups,
-        # merging those groups into one
-
-        # choose any
-        my $dest_group;
-        foreach (keys %{$conflicting_groups}) {
-          $dest_group = $_;
-          last;
-        }
-
-        # and attach all tasks from all the conflicting groups
-        # to the destination group
-        foreach my $tg (keys %{$conflicting_groups}) {
-          foreach my $tt (keys %{$task_groups->{$tg}}) {
-            $task_groups->{$dest_group}->{$tt} = 1;
-          }
-
-          if ($tg && $tg ne $dest_group) {
-            delete($task_groups->{$tg});
-          }
-        }
-      }
-      elsif (scalar(keys %{$conflicting_groups}) eq 1) {
-        # found conflicting tasks in one group,
-        # attaching the task to this group
-
-        my $dest_group;
-        foreach (keys %{$conflicting_groups}) {
-          $dest_group = $_;
-          last;
-        }
-
-        $attach_task_to_group->($dest_group, $task_name);
-      }
-      else {
-        # conflicting tasks are not in any group,
-        # should attach them to the group where
-        # this task will be
-        
-        my $tg = find_group_by_task($task_groups, $task_name);
-        
-        # current task is not in any group --
-        # creating new group with its name
-        if (!$tg) {
-          $tg = $task_name;
-          $task_groups->{$tg} = {};
-          
-          $attach_task_to_group->($tg, $task_name);
-        }
-
-        foreach my $ctg (@{$task->{'conflicts'}}) {
-          $attach_task_to_group->($tg, $ctg);
-        }
+    my $conflicting_tasks_are_running;
+    CHECK_CONFLICTS: foreach my $ct_name (keys %{$task->{'conflicts_hash'}}) {
+      if (find_child($ct_name)) {
+        $conflicting_tasks_are_running = 1;
+        last CHECK_CONFLICTS;
       }
     }
 
-    if (! find_group_by_task($task_groups, $task_name)) {
-      $task_groups->{$task_name} = {};
-      $attach_task_to_group->($task_name, $task_name);
-    }
+    next if $conflicting_tasks_are_running;
+
+    my $last_start_label = $task->{'last_start'} || -1;
+    
+    $could_be_run_tasks->{$last_start_label} = []
+      unless $could_be_run_tasks->{$last_start_label};
+
+    push (@{$could_be_run_tasks->{$last_start_label}}, $task_name);
+  }
+
+  # choose random task from the tasks
+  # with the oldest last_start time
+  # (or even no last_start time at all)
+  #
+  # start it and leave scheduling
+  # (so the algorithm is run on the next cycle,
+  # accounting for the currently spawned task)
+  # 
+  START_TASK: foreach my $last_start_label (sort {$a <=> $b} keys %{$could_be_run_tasks}) {
+    my $tasks_to_be_started = $could_be_run_tasks->{$last_start_label};
+    
+    my $total_possible_tasks = scalar(@{$tasks_to_be_started});
+    my $random_index = int(rand($total_possible_tasks));
+
+    my $task_name_to_start = ${$tasks_to_be_started}[$random_index];
+
+    Yandex::Tools::debug("starting [$task_name_to_start]");
+    add_child($task_name_to_start);
+
+    last START_TASK;
   }
 }
 
@@ -654,131 +656,153 @@ sub refreshOptions {
   my $defined_jobs = {};
 
   # read daemon jobs
-  $tmp = Yandex::Tools::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
-  foreach my $o (@{$tmp}) {
-    next if $o =~ /^\./o;
+  if (-d "$dir/jobs") {
+    $tmp = Yandex::Tools::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
+    foreach my $o (@{$tmp}) {
+      next if $o =~ /^\./o;
 
-    $defined_jobs->{$o} = 1;
+      $defined_jobs->{$o} = 1;
 
-    my $dirinfo = Yandex::Tools::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
+      my $dirinfo = Yandex::Tools::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
 
-    # job was not modified since we've read it
-    if ($tasks->{$o} && $tasks->{$o}->{'mtime'} eq $dirinfo->{'mtime'}) {
-      next;
-    }
-
-    if ($tasks->{$o}) {
-      Yandex::Tools::do_log("reread job [$o] from disk");
-    }
-
-    $tasks->{$o}->{'mtime'} = $dirinfo->{'mtime'};
-
-    my $joptions = Yandex::Tools::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
-    foreach my $jo (@{$joptions}) {
-      if ($jo eq 'conflicts') {
-        $tasks->{$o}->{$jo} = Yandex::Tools::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
+      # job was not modified since we've read it
+      if ($tasks->{$o} && $tasks->{$o}->{'mtime'} eq $dirinfo->{'mtime'}) {
+        next;
       }
-      elsif ($jo eq 'cmd') {
-        $tasks->{$o}->{$jo} = $dir . "/jobs/" . $o . "/" . $jo;
+
+      if ($tasks->{$o}) {
+        Yandex::Tools::do_log("reread job [$o] from disk");
       }
-      else {
-        $tasks->{$o}->{$jo} = Yandex::Tools::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
+
+      $tasks->{$o}->{'mtime'} = $dirinfo->{'mtime'};
+
+      my $joptions = Yandex::Tools::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
+      foreach my $jo (@{$joptions}) {
+        if ($jo eq 'conflicts') {
+          $tasks->{$o}->{$jo} = Yandex::Tools::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
+        }
+        elsif ($jo eq 'cmd') {
+          $tasks->{$o}->{$jo} = $dir . "/jobs/" . $o . "/" . $jo;
+        }
+        else {
+          $tasks->{$o}->{$jo} = Yandex::Tools::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
+        }
       }
     }
-    if (defined($tasks->{$o}->{'disabled'}) && !$opts->{'keep_disabled'}) {
-      delete($tasks->{$o});
-    }
-  }
-  
-  # cleanup removed jobs, validate tasks
-  TASKS: foreach my $task_name (keys %{$tasks}) {
-    if (!$defined_jobs->{$task_name}) {
-      Yandex::Tools::do_log("job [$task_name] removed");
-      delete($tasks->{$task_name});
-      next TASKS;
-    }
-
-    my $task = $tasks->{$task_name};
-
-    if (!defined($task->{'execution_timeout'}) || !int($task->{'execution_timeout'})) {
-      $task->{'execution_timeout'} = 0;
-    }
-    if (!defined($task->{'kill_timeout'}) ||
-      !int($task->{'kill_timeout'}) && $task->{'kill_timeout'} ne 0) {
-      $task->{'kill_timeout'} = 60;
-    }
-
-    foreach my $mp ("cmd") {
-      if (!$task->{$mp}) {
-        Yandex::Tools::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
-        delete($tasks->{$task_name});
+    
+    # mark removed jobs, validate tasks
+    TASKS: foreach my $task_name (keys %{$tasks}) {
+      if (!$defined_jobs->{$task_name}) {
+        Yandex::Tools::do_log("job [$task_name] removed from configuration");
+        $tasks->{$task_name}->{'TO_BE_REMOVED'} = 1;
         next TASKS;
       }
-    }
-    if (! -x $task->{'cmd'}) {
-      Yandex::Tools::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
-      delete($tasks->{$task_name});
-      next TASKS;
-    }
 
-    if ((!$task->{'execution_interval'} && !$task->{'execution_schedule'}) ||
-      ($task->{'execution_interval'} && $task->{'execution_schedule'})) {
-      
-      Yandex::Tools::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
-      delete($tasks->{$task_name});
-      next TASKS;
-    }
+      my $task = $tasks->{$task_name};
 
-    if ($task->{'execution_schedule'}) {
-      my $cron;
-      eval {
-        $cron = new Schedule::Cron::Events($task->{'execution_schedule'}, Seconds => time());
-      };
-
-      if (!$cron) {
-        my $msg = $@;
-        # leave only first line
-        $msg =~ s/[\r\n].+$//sgo;
-        # remove filename in which the error was raised
-        $msg =~ s/at\ \/.+$//sgo;
-        $msg = ": $msg" if $msg;
-
-        Yandex::Tools::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
-        delete($tasks->{$task_name});
-        next TASKS;
+      if (!defined($task->{'execution_timeout'}) || !int($task->{'execution_timeout'})) {
+        $task->{'execution_timeout'} = 0;
       }
-      $task->{'cron'} = $cron;
-      $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
-    }
-
-    foreach my $dp ("execution_interval", "execution_timeout", "notification_interval", "start_random_sleep") {
-      if ($task->{$dp} && !Yandex::Tools::is_digital($task->{$dp})) {
-        Yandex::Tools::do_log("skipping job [$task_name]: [$dp] must be numeric");
-        delete($tasks->{$task_name});
-        next TASKS;
+      if (!defined($task->{'kill_timeout'}) ||
+        !int($task->{'kill_timeout'}) && $task->{'kill_timeout'} ne 0) {
+        $task->{'kill_timeout'} = 60;
       }
-    }
 
-    if ($task->{'conflicts'} && ref($task->{'conflicts'}) ne 'ARRAY') {
-      Yandex::Tools::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
-      delete($tasks->{$task_name});
-      next TASKS;
-    }
-    if ($task->{'conflicts'}) {
-      foreach my $c_task (@{$task->{'conflicts'}}) {
-        if ($c_task eq $task_name) {
-          Yandex::Tools::do_log("skipping job [$task_name]: task conflicts with itself.");
+      foreach my $mp ("cmd") {
+        if (!$task->{$mp}) {
+          Yandex::Tools::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
           delete($tasks->{$task_name});
           next TASKS;
         }
       }
+      if (! -x $task->{'cmd'}) {
+        Yandex::Tools::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
+        delete($tasks->{$task_name});
+        next TASKS;
+      }
+
+      if ((!$task->{'execution_interval'} && !$task->{'execution_schedule'}) ||
+        ($task->{'execution_interval'} && $task->{'execution_schedule'})) {
+        
+        Yandex::Tools::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
+        delete($tasks->{$task_name});
+        next TASKS;
+      }
+
+      if ($task->{'execution_schedule'}) {
+        my $cron;
+        eval {
+          $cron = new Schedule::Cron::Events($task->{'execution_schedule'}, Seconds => time());
+        };
+
+        if (!$cron) {
+          my $msg = $@;
+          # leave only first line
+          $msg =~ s/[\r\n].+$//sgo;
+          # remove filename in which the error was raised
+          $msg =~ s/at\ \/.+$//sgo;
+          $msg = ": $msg" if $msg;
+
+          Yandex::Tools::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
+          delete($tasks->{$task_name});
+          next TASKS;
+        }
+        $task->{'cron'} = $cron;
+        $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
+      }
+
+      foreach my $dp ("execution_interval", "execution_timeout", "notification_interval", "start_random_sleep") {
+        if ($task->{$dp} && !Yandex::Tools::is_digital($task->{$dp})) {
+          Yandex::Tools::do_log("skipping job [$task_name]: [$dp] must be numeric");
+          delete($tasks->{$task_name});
+          next TASKS;
+        }
+      }
+
+      if ($task->{'conflicts'} && ref($task->{'conflicts'}) ne 'ARRAY') {
+        Yandex::Tools::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
+        delete($tasks->{$task_name});
+        next TASKS;
+      }
+      if ($task->{'conflicts'}) {
+        foreach my $c_task (@{$task->{'conflicts'}}) {
+          if ($c_task eq $task_name) {
+            Yandex::Tools::do_log("skipping job [$task_name]: task conflicts with itself.");
+            delete($tasks->{$task_name});
+            next TASKS;
+          }
+        }
+      }
+
+      # defaults
+      $task->{'notification_interval'} = 0 unless $task->{'notification_interval'};
     }
   }
 
-  # apply new tasks, recalculate task groups
+  # apply new tasks
   $snaked::Daemon::runtime->{'tasks'} = $tasks;
-  $snaked::Daemon::runtime->{'task_groups'} = {};
-  prepare_task_groups();
+
+  # rebuild conflicts_hash for each task
+  #
+  foreach my $tn (keys %{$tasks}) {
+    my $t = $tasks->{$tn};
+    
+    next unless $t->{'conflicts'};
+
+    foreach my $ctn (@{$t->{'conflicts'}}) {
+      my $ct = $tasks->{$ctn};
+
+      # silently skip conflicting tasks
+      # which are not configured (configuration typo)
+      next unless $ct;
+
+      # (possibly) add $t into $ct conflicts
+      $ct->{'conflicts_hash'}->{$tn} = $t;
+
+      # (possibly) add $ct into $t conflicts
+      $t->{'conflicts_hash'}->{$ctn} = $ct;
+    }
+  }
 }
 
 sub canonical_command_line {
@@ -855,14 +879,17 @@ sub exec_ps_snaked {
   Yandex::Tools::exec($my_command_line);
 }
 
-# spawn additional watchdogs slowly
+# spawn additional watchdogs slowly,
+# returns total number of running processes
+#
 sub manage_watchdogs {
   my $ptable = Yandex::Tools::ProcessList::get_process_table();
 
   my $number_of_watchdogs = 0;
   # get the ps-snaked daemon process for which the watchdog is running
   my $my_process = undef;
-  foreach my $p (@$ptable) {
+
+  foreach my $p (@{$ptable}) {
     next unless $p->cmndline;
     next if !Yandex::Tools::matches_with_one_of_regexps($p->cmndline, [$watchdog_match, $watchdog_match1]);
 
@@ -875,6 +902,8 @@ sub manage_watchdogs {
     $t_cmdline =~ s/\-\-daemon/\-\-watchdog/;
     Yandex::Tools::run_forked($t_cmdline);
   }
+
+  return scalar(@{$ptable});
 }
 
 sub stop_watchdogs {
@@ -1008,7 +1037,10 @@ sub run_watchdog {
         }
       }
 
-      $snaked::Daemon::runtime->{'usec_2check_watchdog'} = ($watchdogs2maintain + 1) * 2 * 2000000;
+      $snaked::Daemon::runtime->{'usec_2check_watchdog'} = watchdog_check_timeout({
+        'watchdogs2maintain' => $watchdogs2maintain,
+        'number_of_processes' => scalar(@{$ptable}),
+        });
     }
 
     usleep(50000);
@@ -1035,9 +1067,6 @@ sub get_cfg_path {
       }
       if (! -d $ENV{'PS_SNAKED_CFG'} && -d "/etc/ps-farm/options/ps-snaked") {
         $ENV{'PS_SNAKED_CFG'} = "/etc/ps-farm/options/ps-snaked";
-      }
-      if (! -d $ENV{'PS_SNAKED_CFG'} && -d "/etc/snaked") {
-        $ENV{'PS_SNAKED_CFG'} = "/etc/snaked";
       }
     }
   }
@@ -1071,6 +1100,14 @@ if (Yandex::Tools::defined_cmdline_param('stop')) {
   if ($d) {
     print "requesting " . $d->pid() . " [" . $d->cmndline . "] to stop\n";
     kill (15, $d->pid);
+
+    if (Yandex::Tools::defined_cmdline_param('wait')) {
+      while (Yandex::Tools::ProcessList::get_other_daemon_process({'refresh_startup_processes' => 1})) {
+        print ".";
+        sleep 1;
+      }
+      print "\n";
+    }
   }
   else {
     print "no snaked daemon found for $ENV{'PS_SNAKED_CFG'}\n";
@@ -1094,7 +1131,53 @@ elsif (Yandex::Tools::defined_cmdline_param('restart')) {
     if (!Yandex::Tools::defined_cmdline_param('only-errors')) {
       print "requesting " . $d->pid() . " [" . $d->cmndline . "] to restart\n";
     }
-    kill ("USR2", $d->pid)
+    kill ("USR2", $d->pid);
+
+    if (Yandex::Tools::defined_cmdline_param('wait')) {
+      my $running_daemon = Yandex::Tools::ProcessList::get_other_daemon_process({'refresh_startup_processes' => 1});
+
+      my $no_daemon_retries = 0;
+      my $new_daemon_retries = 3;
+      my $new_daemon_pid;
+
+      while (!$new_daemon_pid # while previous daemon shuts down and new starts up
+          ||
+        $new_daemon_pid && # some new daemon started
+        $new_daemon_retries > 0 # check that new
+        ) {
+
+        $running_daemon = Yandex::Tools::ProcessList::get_other_daemon_process({'refresh_startup_processes' => 1});
+
+        if (!$running_daemon) {
+          $no_daemon_retries = $no_daemon_retries + 1;
+        }
+        else {
+          $no_daemon_retries = 0;
+        }
+        if ($no_daemon_retries > 5) {
+          print "snaked won't start, still trying...";
+          $no_daemon_retries = 0;
+        }
+
+        if ($new_daemon_pid) {
+          if ($new_daemon_pid eq $running_daemon->pid) {
+            $new_daemon_retries = $new_daemon_retries - 1;
+          }
+          else {
+            $new_daemon_pid = $running_daemon->pid;
+            $new_daemon_retries = 3;
+          }
+        }
+        if (!$new_daemon_pid && $running_daemon && $d->pid ne $running_daemon->pid) {
+          $new_daemon_pid = $running_daemon->pid;
+        }
+
+        print ".";
+        sleep 1;
+      }
+      print "\n";
+      print "snaked is running as pid " . $running_daemon->pid . ". command line [" . $running_daemon->cmndline . "]\n";
+    }
   }
   else {
     print "no snaked daemon found for $ENV{'PS_SNAKED_CFG'}\n";
@@ -1112,7 +1195,7 @@ elsif (Yandex::Tools::defined_cmdline_param('status')) {
   exit 0;
 }
 elsif (Yandex::Tools::defined_cmdline_param('show-jobs')) {
-  refreshOptions($ENV{'PS_SNAKED_CFG'}, {'keep_disabled' => 1});
+  refreshOptions($ENV{'PS_SNAKED_CFG'});
   print "    global options\n";
   foreach my $k (sort keys %{$snaked::Daemon::runtime->{'config'}}) {
     print "      $k: " . $snaked::Daemon::runtime->{'config'}->{$k}->{'value'} . "\n";
@@ -1148,7 +1231,7 @@ if (!Yandex::Tools::defined_cmdline_param('daemon') && !Yandex::Tools::defined_c
 }
 
 if (!get_cfg_path()) {
-  die "no configuration found (default /etc/snaked)";
+  die "no configuration found (try creating /etc/snaked)";
 }
 refreshOptions($ENV{'PS_SNAKED_CFG'}, {'no-jobs' => $i_am_watchdog});
 if (config_value('log_errors')) {
@@ -1241,8 +1324,15 @@ while (1) {
 
   if (!$snaked::Daemon::runtime->{'flags'}->{'restart'}) {
     if ($snaked::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
-      manage_watchdogs() if $watchdogs2maintain;
-      $snaked::Daemon::runtime->{'usec_2check_watchdog'} = ($watchdogs2maintain + 1) * 2 * 2000000;
+      my $total_number_of_processes = 0;
+      if ($watchdogs2maintain) {
+        $total_number_of_processes = manage_watchdogs();
+      }
+      $snaked::Daemon::runtime->{'usec_2check_watchdog'} =
+        watchdog_check_timeout({
+          'watchdogs2maintain' => $watchdogs2maintain,
+          'number_of_processes' => $total_number_of_processes,
+          });
     }
   }
 
@@ -1271,14 +1361,14 @@ while (1) {
       $v->{'killtime'} = time();
 
       do_err_log("killed long running (". ($now - $v->{'borntime'}) .
-        " seconds) process [$v->{'pid'}] [$v->{'type'}]", {"stderr" => 1});
+        " seconds) process [$v->{'pid'}] [$v->{'name'}]", {"stderr" => 1});
       Yandex::Tools::do_log("killed long running (". ($now - $v->{'borntime'}) .
-        " seconds) process [$v->{'pid'}] [$v->{'type'}]", {"stderr" => 1});
+        " seconds) process [$v->{'pid'}] [$v->{'name'}]", {"stderr" => 1});
     }
 
     my $waitpid = waitpid($v->{'pid'}, WNOHANG);
     
-    Yandex::Tools::debug("\tchild [$v->{'pid'}] [$v->{'type'}] [" . ($v->{'id'} ? $v->{'id'} : "") . "]: $waitpid;".
+    Yandex::Tools::debug("\tchild [$v->{'pid'}] [$v->{'name'}] [" . ($v->{'id'} ? $v->{'id'} : "") . "]: $waitpid;".
       " running " . (time() - $v->{'borntime'}) . " seconds");
 
     manage_child($v->{'pid'});
@@ -1290,21 +1380,12 @@ while (1) {
 
   if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} ||
     $snaked::Daemon::runtime->{'usec_2refresh_configuration'} < 1) {
-    if (!have_children()) {
-      if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'}) {
-        Yandex::Tools::do_log("requested to reread configuration, rereading");
-      }
-      refreshOptions($ENV{'PS_SNAKED_CFG'});
-      $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 0;
-      $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = 1000000 * 60;
+    if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'}) {
+      Yandex::Tools::do_log("requested to reread configuration, rereading");
     }
-    else {
-      if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} &&
-        !$snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'}) {
-        Yandex::Tools::do_log("requested to reread configuration, waiting for children to stop");
-        $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration_logged'} = 1;
-      }
-    }
+    refreshOptions($ENV{'PS_SNAKED_CFG'});
+    $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 0;
+    $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = 1000000 * 60;
   }
   if ($snaked::Daemon::runtime->{'flags'}->{'restart'}) {
     if ($Yandex::Tools::debug) {
@@ -1321,89 +1402,7 @@ while (1) {
 
   # do processing if we were not requested to stop
   unless ($snaked::Daemon::runtime->{'flags'}->{'stop'}) {
-
-    my $task_groups = $snaked::Daemon::runtime->{'task_groups'};
-
-    # run all the tasks one by one (task groups are concurrent)
-    foreach my $tg (keys %{$task_groups}) {
-      $snaked::Daemon::runtime->{'current_tasks'}->{$tg} = {}
-        unless $snaked::Daemon::runtime->{'current_tasks'}->{$tg};
-
-      my $current_tasks = $snaked::Daemon::runtime->{'current_tasks'}->{$tg};
-      my $configured_tasks = $snaked::Daemon::runtime->{'tasks'};
-
-      if (scalar(keys %{$current_tasks})) {
-        # process tasks in this task group
-        foreach my $task_name (keys %{$current_tasks}) {
-          my $task = $configured_tasks->{$task_name};
-          
-          # do not start task if it's already running
-          next if find_child(undef, $task_name);
-
-          # check if there're tasks runing
-          # which block this task
-          my $do_not_run = 0;
-          foreach my $ctask (keys %{$task_groups->{$tg}}) {
-            next if $ctask eq $task_name;
-
-            if (find_child(undef, $ctask)) {
-              $do_not_run = 1;
-              last;
-            }
-          }
-
-          next if $do_not_run;
-
-          Yandex::Tools::debug("starting [$task_name]");
-          add_child($task_name);
-        }
-      }
-      else {
-        # we've completed all tasks, reschedule tasks which need to be executed
-        foreach my $task_name (keys %{$task_groups->{$tg}}) {
-          my $task = $configured_tasks->{$task_name};
-          my $child_e = get_child_cache($task_name);
-          my $now = time();
-
-          if ($task->{'start_random_sleep'}) {
-            if (!$child_e->{'startup_sleep'}) {
-              $child_e->{'startup_sleep'} = int(rand($task->{'start_random_sleep'}));
-              $child_e->{'startup_sleep_started'} = $now;
-              Yandex::Tools::debug("task [$task_name] random sleep [$child_e->{'startup_sleep'}]");
-            }
-
-            if ($now - $child_e->{'startup_sleep_started'} > $child_e->{'startup_sleep'}) {
-              $child_e->{'startup_sleep_finished'} = $now;
-              Yandex::Tools::debug("task [$task_name] random sleep finished");
-            }
-          }
-          else {
-            # random startup sleep not configured for the task
-            $child_e->{'startup_sleep_finished'} = $now;
-          }
-
-          # schedule only those tasks which:
-          #   - finished random startup sleep time (if configured) AND
-          #     - were not run for $task->{'execution_interval'} time or
-          #     - have there next_run time passed
-          #
-          if ($child_e->{'startup_sleep_finished'} && (
-                $task->{'next_run'} && $task->{'next_run'} <= $now
-                  ||
-                $task->{'execution_interval'} &&
-                  $now - $child_e->{'laststart'} > $task->{'execution_interval'}
-              )
-            ) {
-
-            if ($task->{'next_run'}) {
-              $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
-            }
-
-            $current_tasks->{$task_name} = $task;
-          }
-        }
-      }
-    }
+    run_scheduling();
   }
   else {
     # wait for children to exit and exit then
@@ -1437,23 +1436,23 @@ while (1) {
     }
   }
 
+  my $usec_to_sleep;
   if ($Yandex::Tools::debug) {
     Yandex::Tools::debug("-");
-    sleep (1);
+    $usec_to_sleep = 1000000;
   }
   else {
-    my $usec_to_sleep;
     if ($have_active_children) {
-      $usec_to_sleep = 50000;
+      $usec_to_sleep = 500000;
     }
     else {
       $usec_to_sleep = 500000;
     }
-
-   usleep($usec_to_sleep);
-   $snaked::Daemon::runtime->{'usec_2check_watchdog'} = $snaked::Daemon::runtime->{'usec_2check_watchdog'} - $usec_to_sleep;
-   $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = $snaked::Daemon::runtime->{'usec_2refresh_configuration'} - $usec_to_sleep;
   }
+
+  usleep($usec_to_sleep);
+  $snaked::Daemon::runtime->{'usec_2check_watchdog'} = $snaked::Daemon::runtime->{'usec_2check_watchdog'} - $usec_to_sleep;
+  $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = $snaked::Daemon::runtime->{'usec_2refresh_configuration'} - $usec_to_sleep;
 }
 
 # yes i know this is the way

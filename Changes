@@ -1,3 +1,6 @@
+0.06
+  - new scheduling algorithm
+
 0.05
   - moved library functions into Yandex::Tools
 
