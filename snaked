@@ -53,7 +53,7 @@ use IO::Handle; # autoflush
 use Socket; # socketpair
 use Fcntl;
 
-my $version = '($Id: snaked 4815 2010-12-30 16:31:59Z kohts $)';
+my $version = '($Id: snaked 4832 2011-01-17 12:19:37Z kohts $)';
 
 my ($daemon_regexp_configured, $daemon_match_cfg, $daemon_match_cfg1, $daemon_match_nocfg, $watchdog_match, $watchdog_match1);
 
@@ -201,6 +201,8 @@ sub run_task {
   $old_job_name = $ENV{'JOB_NAME'} if defined($ENV{'JOB_NAME'});
   $ENV{'JOB_NAME'} = $task_name;
 
+  my $start_time = time();
+ 
   Yandex::Tools::debug("running task [$task_name] timeout [$task->{'execution_timeout'}] kill timeout [$task->{'kill_timeout'}]");
   my $o = Yandex::Tools::run_forked($task->{'cmd'}, {
     'timeout' => $task->{'execution_timeout'},
@@ -226,6 +228,18 @@ sub run_task {
       $task->{'runtime'}->{'first_failure_time'} = time()
         unless $task->{'runtime'}->{'first_failure_time'};
 
+      my $end_time = time();
+
+      my $task_info =
+        "\n\n" .
+        "task summary\n" .
+        "------------\n" .
+        "pid: $$\n" .
+        "cmdline: $task->{'cmd'}\n" .
+        "start time: $start_time (" . localtime($start_time) . ")\n" .
+        "end time: $end_time (" . localtime($end_time) . ")\n"
+        ;
+
       # do not notify more often than once
       # each $task->{'notification_interval'} seconds
       # (notify after each failure if not defined)
@@ -234,7 +248,7 @@ sub run_task {
           Yandex::Tools::send_mail({
             'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $config->{'admin_email'}->{'value'}),
             'subject' => $0 . ": $task_name warning",
-            'body' => $o->{'err_msg'},
+            'body' => $o->{'err_msg'} . $task_info,
             'no_cc_all' => 1,
             });
           
@@ -247,7 +261,7 @@ sub run_task {
         Yandex::Tools::send_mail({
           'to' => ($task->{'admin_email'} ? $task->{'admin_email'} : $config->{'admin_email'}->{'value'}),
           'subject' => $0 . ": $task_name warning",
-          'body' => $o->{'err_msg'},
+          'body' => $o->{'err_msg'} . $task_info,
           'no_cc_all' => 1,
           });
       
@@ -344,7 +358,7 @@ sub child_started {
   my ($name) = @_;
   my $task = $snaked::Daemon::runtime->{'tasks'}->{$name};
   $task->{'last_start'} = time();
-  if ($task->{'next_run'}) {
+  if ($task->{'cron'}) {
     $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
   }
 }
@@ -486,20 +500,29 @@ sub run_scheduling {
     #
     next unless $task->{'startup_sleep_finished'};
 
-    # choose tasks which should be run (for which the time has come)
+    # choose tasks which should be run
+    # (for which the time has come)
     #
-    if (!$task->{'last_finish'}) {
-      $should_be_run_tasks->{$task_name} = $task;
-    }
-    else {
-      if ($task->{'execution_interval'}) {
-        if ($task->{'last_start'} + $task->{'execution_interval'} <= $now) {
-          $should_be_run_tasks->{$task_name} = $task;
-        }
-      }
-      elsif ($task->{'next_run'} && $task->{'next_run'} <= $now) {
+    # decision about cron tasks can be made
+    # just using cron schedule, but for the
+    # execution_interval tasks we have to check
+    # last_finish/last_start times
+    #
+    if ($task->{'cron'}) {
+      if ($task->{'next_run'} <= $now) {
         $should_be_run_tasks->{$task_name} = $task;
       }
+    }
+    elsif ($task->{'execution_interval'}) {
+      if (!$task->{'last_finish'}) {
+        $should_be_run_tasks->{$task_name} = $task;
+      }
+      elsif ($task->{'last_start'} + $task->{'execution_interval'} <= $now) {
+        $should_be_run_tasks->{$task_name} = $task;
+      }
+    }
+    else {
+      # configuration validation is done in refreshOptions
     }
   }
 
@@ -670,12 +693,20 @@ sub refreshOptions {
         next;
       }
 
+      # save execution schedule so we can decide below
+      # whether we need to recalculate next_run time
+      #
+      if ($tasks->{$o}->{'execution_schedule'}) {
+        $tasks->{$o}->{'previous_execution_schedule'} = $tasks->{$o}->{'execution_schedule'};
+      }
+
       if ($tasks->{$o}) {
-        Yandex::Tools::do_log("reread job [$o] from disk");
+        Yandex::Tools::do_log("[$$] reread job [$o] from disk");
       }
 
       $tasks->{$o}->{'mtime'} = $dirinfo->{'mtime'};
 
+      my $had_disabled;
       my $joptions = Yandex::Tools::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
       foreach my $jo (@{$joptions}) {
         if ($jo eq 'conflicts') {
@@ -684,9 +715,17 @@ sub refreshOptions {
         elsif ($jo eq 'cmd') {
           $tasks->{$o}->{$jo} = $dir . "/jobs/" . $o . "/" . $jo;
         }
+        elsif ($jo eq 'disabled') {
+          $had_disabled = 1;
+          $tasks->{$o}->{'disabled'} = 1;
+        }
         else {
           $tasks->{$o}->{$jo} = Yandex::Tools::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
         }
+      }
+
+      if (!$had_disabled && defined($tasks->{$o}->{'disabled'})) {
+        delete ($tasks->{$o}->{'disabled'});
       }
     }
     
@@ -721,6 +760,8 @@ sub refreshOptions {
         next TASKS;
       }
 
+      # one of scheduling methods must be specified
+      #
       if ((!$task->{'execution_interval'} && !$task->{'execution_schedule'}) ||
         ($task->{'execution_interval'} && $task->{'execution_schedule'})) {
         
@@ -729,7 +770,12 @@ sub refreshOptions {
         next TASKS;
       }
 
-      if ($task->{'execution_schedule'}) {
+      if ($task->{'execution_schedule'} &&
+        (
+          $task->{'previous_execution_schedule'} && $task->{'execution_schedule'} ne $task->{'previous_execution_schedule'} || # runtime
+          !$task->{'previous_execution_schedule'} # start-up
+        )
+        ) {
         my $cron;
         eval {
           $cron = new Schedule::Cron::Events($task->{'execution_schedule'}, Seconds => time());
@@ -749,6 +795,9 @@ sub refreshOptions {
         }
         $task->{'cron'} = $cron;
         $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
+
+        # new schedule was applied, do not bother doing it again
+        $task->{'previous_execution_schedule'} = $task->{'execution_schedule'};
       }
 
       foreach my $dp ("execution_interval", "execution_timeout", "notification_interval", "start_random_sleep") {
