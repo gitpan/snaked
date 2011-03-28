@@ -1,7 +1,7 @@
 package snaked;
 
 use vars qw($VERSION);
-$VERSION = '0.07';
+$VERSION = '0.09';
 
 use strict;
 use warnings;
@@ -251,7 +251,7 @@ waiting for the conflicting jobs.
 
 =head1 CREDITS
 
-Thank you to Yandex team (in alphabetic order):
+Thanks to the whole Yandex team and personally to the following people (in alphabetic order):
 
   Denis Barov
   Maxim Dementyev
@@ -260,6 +260,7 @@ Thank you to Yandex team (in alphabetic order):
   Andrey Ignatov
   Dmitry Parfenov
   Alexey Simakov
+  Dmitrij Tejblum
   Julie S Ukhlicheva
   Anton Ustyugov
   Andrey Zonov
@@ -272,7 +273,7 @@ Petya Kohts E<lt>petya@kohts.ruE<gt>
 
 =head1 COPYRIGHT
 
-Copyright 2009 - 2010 Petya Kohts.
+Copyright 2009 - 2011 Petya Kohts.
 
 This program is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
