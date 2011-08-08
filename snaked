@@ -44,7 +44,6 @@ use Yandex::Tools;
 use Yandex::Tools::ProcessList;
 
 package snaked::Daemon;
-use Storable;
 use Schedule::Cron::Events;
 use Time::Local;
 use POSIX;
@@ -53,7 +52,7 @@ use Socket; # socketpair
 use Fcntl;
 use Time::HiRes;
 
-my $version = '($Id: snaked 5077 2011-03-28 11:42:16Z andozer $)';
+my $version = '($Id: snaked 5492 2011-08-02 04:45:53Z kohts $)';
 
 my ($daemon_regexp_configured, $daemon_match_cfg, $daemon_match_cfg1, $daemon_match_nocfg, $watchdog_match, $watchdog_match1);
 
@@ -76,28 +75,13 @@ if ($^O eq 'linux') {
   $use_usleep = 1;
 }
 else {
-  my $ret = system("sleep 1");
+  my $ret = system("sleep 0");
   if ($ret eq 0) {
     $have_sleep_external = 1;
   }
   else {
     write_spool("external_sleep_error", "no external sleep: code [$?]; err: [$!]\n", {'mode' => "append"});
   }
-}
-
-sub clock_mono {
-  return int(Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()));
-}
-
-sub clock_real {
-  return int(Time::HiRes::clock_gettime(Time::HiRes::CLOCK_REALTIME()));
-}
-
-sub my_clock {
-  return {
-    'mono' => clock_mono(),
-    'real' => clock_real(),
-  };
 }
 
 sub clock_adjusted {
@@ -144,7 +128,7 @@ sub my_usleep {
     }
   }
 
-  my $before = my_clock();
+  my $before = snaked::my_clock();
   if ($use_usleep) {
 #    Time::HiRes::setitimer($Time::HiRes::ITIMER_REAL, $usec / 1_000_000);
 #    Time::HiRes::nanosleep($usec * 1000);
@@ -158,8 +142,33 @@ sub my_usleep {
     
     if ($have_sleep_external) {
       my $ret = system("sleep $sec");
-      if ($ret ne 0) {
+
+      # http://perldoc.perl.org/functions/system.html
+      #
+      # Since SIGINT and SIGQUIT are ignored during the execution of system,
+      # if you expect your program to terminate on receipt of these signals
+      # you will need to arrange to do so yourself based on the return value.
+      #
+      if ($ret == -1) {
         write_spool("external_sleep_error", "code [$?]; err: [$!]", {'mode' => "append"});
+      }
+      elsif ($ret & 127) {
+        my $sig = $ret & 127;
+     
+        # forward SIGINT and SIGQUIT to the main process
+        #
+        if ($sig eq 2 || $sig eq 3) {
+          sigTERM_handler();
+        }
+        else {
+          write_spool("external_sleep_error", "child died with signal $sig",  {'mode' => "append"});
+        }
+      }
+      else {
+        my $exit_value = $ret >> 8;
+        if ($exit_value ne 0) {
+          write_spool("external_sleep_error", "child exited with value $exit_value",  {'mode' => "append"});
+        }
       }
     }
     else {
@@ -168,7 +177,7 @@ sub my_usleep {
     
     $usec = $sec * 1_000_000;
   }
-  my $after = my_clock();
+  my $after = snaked::my_clock();
 
   # log if slept X times longer than requested
   if (($after->{'mono'} - $before->{'mono'}) > (($usec / 1_000_000) * 20)) {
@@ -209,29 +218,8 @@ sub watchdog_check_timeout {
   return $timeout_step + $k;
 }
 
-$snaked::Daemon::runtime = {
-  "type" => "master",
-
-  "flags" => {
-    "stop" => 0,
-    "refresh_configuration" => 0,
-    },
-
-  "children" => {},
-
-  "usec_2check_watchdog" => 0,
-  "usec_2refresh_configuration" => 0,
-  
-  "start_time" => my_clock(),
-
-  "tasks" => {}, # mixed configuration and runtime task options/parameters
-
-  "config" => {},
-
-  };
-
 sub sigTERM_handler {
-#  Yandex::Tools::do_log("snaked $$ term");
+#  Yandex::Tools::do_log("snaked $$ term: " . $snaked::Daemon::runtime->{'type'});
   if ($snaked::Daemon::runtime->{'type'} eq 'master') {
     $snaked::Daemon::runtime->{'flags'}->{'stop'} = 1;
   }
@@ -308,13 +296,20 @@ sub write_spool {
 sub debug_main_cycle {
   my ($label, $msg, $opts) = @_;
   
-  my $debug_top_dir = config_value('debug_main_cycle');
-  return unless $debug_top_dir;
   return unless $label;
 
-  $msg = "" unless $msg;
+  my $debug_top_dir;
+  if ($snaked::Daemon::runtime->{'type'} eq 'master') {
+    $debug_top_dir = config_value('debug_main_cycle');
+  }
+  else {
+    $debug_top_dir = config_value('debug_watchdog');
+  }
 
-  $msg = clock_adjusted(my_clock()) . ": " . $msg;
+  return unless $debug_top_dir;
+
+  $msg = "" unless $msg;
+  $msg = clock_adjusted(snaked::my_clock()) . ": " . $msg;
   
   # trying to block as less as possible
   #
@@ -343,13 +338,18 @@ sub help() {
 
       configuration:
         --add-job JOB --param value    -- configure new job
-        --delete-jobs [JOBS]           -- delete listed jobs
         --modify-job JOB --param value -- modify job parameters
+        --delete-jobs JOBS             -- delete listed jobs
+
         --disable-jobs [JOBS]          -- disable all (or listed) jobs
         --enable-jobs [JOBS]           -- enable all (or listed) jobs
-        --show-jobs                    -- show configured daemon jobs
 
-        --version                      -- show daemon version
+        --show-jobs                    -- show configured daemon jobs
+        --show-job JOB [--param]       -- shows either all parameters of the job
+                                          or those specified by the --param
+                                          (space separated)
+
+        --version          -- show daemon version
 
 ';
   exit 0;
@@ -394,7 +394,7 @@ sub run_task {
   $old_job_name = $ENV{'JOB_NAME'} if defined($ENV{'JOB_NAME'});
   $ENV{'JOB_NAME'} = $task_name;
 
-  my $start_time = my_clock();
+  my $start_time = snaked::my_clock();
 
   # do not forget to modify remove_child which reads this message
   #
@@ -428,7 +428,7 @@ sub run_task {
       $task->{'runtime'}->{'first_failure_time'} = $start_time->{'mono'}
         unless $task->{'runtime'}->{'first_failure_time'};
 
-      my $end_time = my_clock();
+      my $end_time = snaked::my_clock();
 
       my $task_info =
         "\n\n" .
@@ -531,7 +531,7 @@ sub add_child {
     my $child = {
       'pid' => $pid,
       'name' => $task_name,
-      'borntime' => clock_mono(),
+      'borntime' => snaked::clock_mono(),
       'killtime' => 0,
       'child_socket' => $child_socket,
       'child_control_socket' => $child_control_socket,
@@ -545,8 +545,17 @@ sub add_child {
     child_started($task_name);
   }
   else {
-    Yandex::Tools::die("cannot fork: $!") unless defined $pid;
+    # this is the parent code which is unable to fork (!);
+    # logging the state, waiting for a while and retrying
+    #
+    if (! defined($pid)) {
+      Yandex::Tools::do_log("cannot fork: $!");
+      $snaked::Daemon::runtime->{'usec_2wait_before_fork'} = 30_000_000;
+      return;
+    }
 
+    # now finally here is the child code
+    #
     $snaked::Daemon::runtime->{'type'} = "child";
 
     close $child_socket;
@@ -590,16 +599,16 @@ sub find_child {
 sub child_started {
   my ($name) = @_;
   my $task = $snaked::Daemon::runtime->{'tasks'}->{$name};
-  $task->{'last_start'} = my_clock();
+  $task->{'last_start'} = snaked::my_clock();
   if ($task->{'cron'}) {
-    $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
+    $task->{'next_run'} = Time::Local::timelocal($task->{'cron'}->nextEvent);
   }
 }
 
 sub child_finished {
   my ($name, $output) = @_;
   my $task = $snaked::Daemon::runtime->{'tasks'}->{$name};
-  $task->{'last_finish'} = my_clock();
+  $task->{'last_finish'} = snaked::my_clock();
   if ($output) {
     do_err_log("[$name]: $output");
     Yandex::Tools::do_log("[$name]: $output");
@@ -664,7 +673,7 @@ sub remove_child {
   if ($child->{'output'}) {
     # just in case, when child was brutally killed
     if (!$real_child_start_time) {
-      $real_child_start_time = clock_mono();
+      $real_child_start_time = snaked::clock_mono();
     }
 
     # set first_failure_time (duplicates child code
@@ -733,7 +742,7 @@ sub reschedule_cron_tasks {
     # skip non-cron tasks
     next if ! $task->{'cron'};
 
-    $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
+    $task->{'next_run'} = Time::Local::timelocal($task->{'cron'}->nextEvent);
   }
 }
 
@@ -758,7 +767,7 @@ sub run_scheduling {
     # totally skip disabled tasks
     next if defined($task->{'disabled'});
     
-    my $now = my_clock();
+    my $now = snaked::my_clock();
 
     # postpone tasks which have start_random_sleep configured
     #
@@ -867,310 +876,6 @@ sub run_scheduling {
     add_child($task_name_to_start);
 
     last START_TASK;
-  }
-}
-
-sub refreshOptions {
-  my ($dir, $opts) = @_;
-  
-  $opts = {} unless $opts;
-
-  my $config = $snaked::Daemon::runtime->{'config'};
-  my $tasks = Storable::dclone($snaked::Daemon::runtime->{'tasks'});
-  my $tmp;
-
-  # read daemon options
-  my $new_options = {};
-  my $old_log_options = Yandex::Tools::get_log_options();
-
-  $tmp = Yandex::Tools::read_dir($dir, {'output_type' => 'arrayref', 'only-files' => 1});
-  foreach my $o (@{$tmp}) {
-    next if $o =~ /^\./o;
-
-    my $fileinfo = Yandex::Tools::fileinfo_struct({'absolute_name' => $dir . "/" . $o});
-
-    $new_options->{$o} = 1;
-
-    # option was not modified since we've read it
-    if ($config->{$o} && $config->{$o}->{'mtime'} eq $fileinfo->{'mtime'}) {
-      next;
-    }
-
-    my $option_updated = ($config->{$o} ? 1 : 0);
-
-    $config->{$o}->{'mtime'} = $fileinfo->{'mtime'};
-    $config->{$o}->{'value'} = Yandex::Tools::read_file_option($dir . "/" . $o);
-
-    if ($option_updated) {
-      Yandex::Tools::do_log("new value for option $o: " . $config->{$o}->{'value'});
-    }
-  }
-
-  # remove old options
-  foreach my $opt_name (keys %{$config}) {
-    next if $new_options->{$opt_name};
-
-    # should list all options which have defaults here
-    next if $opt_name eq 'admin_email';
-    next if $opt_name eq 'spool_directory';
-    
-    delete ($config->{$opt_name});
-    Yandex::Tools::do_log("option $opt_name removed");
-  }
-
-  if (!$config->{'admin_email'}) {
-    $config->{'admin_email'} = {
-      'value' => 'root',
-      'mtime' => 0,
-      };
-  }
-
-  # configure logging (defaults to /tmp/ps-snaked.log, three 10MB files, rotated)
-  #
-  my $log_options = {};
-  if ($config->{'log'}) {
-    $log_options->{'filename'} = $config->{'log'}->{'value'};
-  }
-  else {
-    $log_options->{'filename'} = ($ENV{'MY_ROOT'} eq "/" ? "" : $ENV{'MY_ROOT'}) . "/tmp/snaked.log";
-  }
-  if ($config->{'log_rotate_size'}) {
-    $log_options->{'rotate_size'} = $config->{'log_rotate_size'}->{'value'};
-  }
-  else {
-    $log_options->{'rotate_size'} = 1024 * 1024 * 10;
-  }
-  if ($config->{'log_rotate_keep_copies'}) {
-    $log_options->{'rotate_keep_copies'} = $config->{'log_rotate_keep_copies'}->{'value'};
-  }
-  else {
-    $log_options->{'rotate_keep_copies'} = 2;
-  }
-  Yandex::Tools::set_log_options($log_options);
-
-  if (!Yandex::Tools::get_log_options() || !Yandex::Tools::can_log()) {
-    if ($old_log_options) {
-      Yandex::Tools::set_log_options($old_log_options);
-    }
-    else {
-      Yandex::Tools::warn("Can not write to log file [$log_options->{'filename'}], check permissions; logging to STDERR");
-    }
-  }
-
-  if (!$config->{'spool_directory'}) {
-    my $spool_dir = $dir;
-    $spool_dir =~ s/\//_/go;
-    $config->{'spool_directory'} = {
-      'value' => "/tmp/snaked.spool_" . $spool_dir,
-      };
-  }
-  if (!Yandex::Tools::can_write($config->{'spool_directory'}->{'value'} . "/.exist")) {
-    Yandex::Tools::do_log("unable to write to spool directory [" . $config->{'spool_directory'}->{'value'} . "]", {'stderr' => 1});
-    delete($config->{'spool_directory'});
-  }
-
-  if ($config->{'debug_main_cycle'}) {
-    if (! -d $config->{'debug_main_cycle'}->{'value'}) {
-      my $e = mkdir $config->{'debug_main_cycle'}->{'value'};
-      if (!$e) {
-        Yandex::Tools::do_log("unable to create $config->{'debug_main_cycle'}->{'value'}, turning off debug_main_cycle", {'stderr' => 1});
-        delete($config->{'debug_main_cycle'});
-      }
-    }
-  }
-
-  # in watchdog mode we don't need
-  # to read job definitions
-  return if $opts->{'no-jobs'};
-
-
-  my $defined_jobs = {};
-
-  # read daemon jobs
-  if (-d "$dir/jobs") {
-    $tmp = Yandex::Tools::read_dir($dir . "/jobs", {'output_type' => 'arrayref', 'only-directories' => 1});
-    foreach my $o (@{$tmp}) {
-      next if $o =~ /^\./o;
-
-      $defined_jobs->{$o} = 1;
-
-      my $dirinfo = Yandex::Tools::fileinfo_struct({'absolute_name' => $dir . "/jobs/" . $o});
-
-      # job was not modified since we've read it
-      if ($tasks->{$o} && $tasks->{$o}->{'mtime'} eq $dirinfo->{'mtime'}) {
-        next;
-      }
-
-      # save execution schedule so we can decide below
-      # whether we need to recalculate next_run time
-      #
-      if ($tasks->{$o}->{'execution_schedule'}) {
-        $tasks->{$o}->{'previous_execution_schedule'} = $tasks->{$o}->{'execution_schedule'};
-      }
-
-      if ($tasks->{$o} && $snaked::Daemon::runtime->{'tasks'}->{$o}) {
-        Yandex::Tools::do_log("[$$] reread job [$o] from disk");
-      }
-
-      $tasks->{$o}->{'mtime'} = $dirinfo->{'mtime'};
-
-      my $had_disabled;
-      my $joptions = Yandex::Tools::read_dir($dir . "/jobs/" . $o, {'output_type' => 'arrayref', 'only-files' => 1});
-      foreach my $jo (@{$joptions}) {
-        if ($jo eq 'conflicts') {
-          $tasks->{$o}->{$jo} = Yandex::Tools::read_file_array($dir . "/jobs/" . $o . "/" . $jo);
-        }
-        elsif ($jo eq 'cmd') {
-          $tasks->{$o}->{$jo} = $dir . "/jobs/" . $o . "/" . $jo;
-        }
-        elsif ($jo eq 'disabled') {
-          $had_disabled = 1;
-          $tasks->{$o}->{'disabled'} = 1;
-        }
-        else {
-          $tasks->{$o}->{$jo} = Yandex::Tools::read_file_option($dir . "/jobs/" . $o . "/" . $jo);
-        }
-      }
-
-      if (!$had_disabled && defined($tasks->{$o}->{'disabled'})) {
-        delete ($tasks->{$o}->{'disabled'});
-      }
-
-      $tasks->{$o}->{'dirinfo'} = $dirinfo;
-    }
-    
-    # mark removed jobs, validate tasks
-    TASKS: foreach my $task_name (keys %{$tasks}) {
-      if (!$defined_jobs->{$task_name}) {
-        Yandex::Tools::do_log("job [$task_name] removed from configuration");
-        $tasks->{$task_name}->{'TO_BE_REMOVED'} = 1;
-        next TASKS;
-      }
-
-      my $task = $tasks->{$task_name};
-
-      if (!defined($task->{'execution_timeout'}) || !int($task->{'execution_timeout'})) {
-        $task->{'execution_timeout'} = 0;
-      }
-      if (!defined($task->{'kill_timeout'}) ||
-        !int($task->{'kill_timeout'}) && $task->{'kill_timeout'} ne 0) {
-
-        # when lowering this timeout do not forget
-        # that some tasks might need some time
-        # to finish, and they might be important
-        # like sync_applications doing
-        # ps-snake --change-class
-        #
-        # if you decide to lower this limit for the whole installation
-        # consider setting old default for every configured task
-
-        $task->{'kill_timeout'} = 60;
-      }
-
-      foreach my $mp ("cmd") {
-        if (!$task->{$mp}) {
-          Yandex::Tools::do_log("skipping job [$task_name]: mandatory parameter [$mp] not specified");
-          delete($tasks->{$task_name});
-          next TASKS;
-        }
-      }
-      if (! -x $task->{'cmd'}) {
-        Yandex::Tools::do_log("skipping job [$task_name]: [$task->{'cmd'}] is not executable");
-        delete($tasks->{$task_name});
-        next TASKS;
-      }
-
-      # one of scheduling methods must be specified
-      #
-      if ((!$task->{'execution_interval'} && !$task->{'execution_schedule'}) ||
-        ($task->{'execution_interval'} && $task->{'execution_schedule'})) {
-        
-        Yandex::Tools::do_log("skipping job [$task_name]: one and only one of (execution_interval, execution_schedule) must be defined");
-        delete($tasks->{$task_name});
-        next TASKS;
-      }
-
-      if ($task->{'execution_schedule'} &&
-        (
-          $task->{'previous_execution_schedule'} && $task->{'execution_schedule'} ne $task->{'previous_execution_schedule'} || # runtime
-          !$task->{'previous_execution_schedule'} # start-up
-        )
-        ) {
-        my $cron;
-        eval {
-          $cron = new Schedule::Cron::Events($task->{'execution_schedule'}, Seconds => clock_real());
-        };
-
-        if (!$cron) {
-          my $msg = $@;
-          # leave only first line
-          $msg =~ s/[\r\n].+$//sgo;
-          # remove filename in which the error was raised
-          $msg =~ s/at\ \/.+$//sgo;
-          $msg = ": $msg" if $msg;
-
-          Yandex::Tools::do_log("skipping job [$task_name]: invalid execution_schedule $msg");
-          delete($tasks->{$task_name});
-          next TASKS;
-        }
-        $task->{'cron'} = $cron;
-        $task->{'next_run'} = timelocal($task->{'cron'}->nextEvent);
-
-        # new schedule was applied, do not bother doing it again
-        $task->{'previous_execution_schedule'} = $task->{'execution_schedule'};
-      }
-
-      foreach my $dp ("execution_interval", "execution_timeout", "notification_interval", "start_random_sleep") {
-        if ($task->{$dp} && !Yandex::Tools::is_digital($task->{$dp})) {
-          Yandex::Tools::do_log("skipping job [$task_name]: [$dp] must be numeric");
-          delete($tasks->{$task_name});
-          next TASKS;
-        }
-      }
-
-      if ($task->{'conflicts'} && ref($task->{'conflicts'}) ne 'ARRAY') {
-        Yandex::Tools::do_log("skipping job [$task_name]: [conflicts] must be an array reference");
-        delete($tasks->{$task_name});
-        next TASKS;
-      }
-      if ($task->{'conflicts'}) {
-        foreach my $c_task (@{$task->{'conflicts'}}) {
-          if ($c_task eq $task_name) {
-            Yandex::Tools::do_log("skipping job [$task_name]: task conflicts with itself.");
-            delete($tasks->{$task_name});
-            next TASKS;
-          }
-        }
-      }
-
-      # defaults
-      $task->{'notification_interval'} = 0 unless $task->{'notification_interval'};
-    }
-  }
-
-  # apply new tasks
-  $snaked::Daemon::runtime->{'tasks'} = $tasks;
-
-  # rebuild conflicts_hash for each task
-  #
-  foreach my $tn (keys %{$tasks}) {
-    my $t = $tasks->{$tn};
-    
-    next unless $t->{'conflicts'};
-
-    foreach my $ctn (@{$t->{'conflicts'}}) {
-      my $ct = $tasks->{$ctn};
-
-      # silently skip conflicting tasks
-      # which are not configured (configuration typo)
-      next unless $ct;
-
-      # (possibly) add $t into $ct conflicts
-      $ct->{'conflicts_hash'}->{$tn} = $t;
-
-      # (possibly) add $ct into $t conflicts
-      $t->{'conflicts_hash'}->{$ctn} = $ct;
-    }
   }
 }
 
@@ -1303,6 +1008,8 @@ sub run_watchdog {
   my $life_time = 3600 * (rand($watchdogs2maintain) + 1);
 
   while(1) {
+    debug_main_cycle("001");
+
     # stop watchdogs from time to time to toss
     # their pid numbers (which might affect oom killers),
     # but not in case they detect that main process
@@ -1310,11 +1017,15 @@ sub run_watchdog {
     # 
     # watchdogs are restarted by main daemon.
     # 
-    if ((clock_mono() - $snaked::Daemon::runtime->{'start_time'}->{'mono'}) > $life_time && !$unsuccessful_tries) {
+    if ((snaked::clock_mono() - $snaked::Daemon::runtime->{'start_time'}->{'mono'}) > $life_time && !$unsuccessful_tries) {
       exit(0);
     }
 
+    debug_main_cycle("002");
+
     if ($snaked::Daemon::runtime->{'usec_2check_watchdog'} < 1) {
+      debug_main_cycle("003");
+
       my $ptable = Yandex::Tools::ProcessList::get_process_table();
 
       my $currently_running_watchdogs = 0;
@@ -1355,6 +1066,8 @@ sub run_watchdog {
           }
         }
       }
+
+      debug_main_cycle("004");
 
       if ($my_process) {
         $unsuccessful_tries = 0;
@@ -1410,14 +1123,21 @@ sub run_watchdog {
         }
       }
 
+      debug_main_cycle("005");
+
       $snaked::Daemon::runtime->{'usec_2check_watchdog'} = watchdog_check_timeout({
         'watchdogs2maintain' => $watchdogs2maintain,
         'number_of_processes' => scalar(@{$ptable}),
         });
     }
 
+
+    debug_main_cycle("006");
+
     my $slept = my_usleep(500000);
     $snaked::Daemon::runtime->{'usec_2check_watchdog'} = $snaked::Daemon::runtime->{'usec_2check_watchdog'} - $slept;
+
+    debug_main_cycle("007");
   }
   exit (255);
 }
@@ -1601,6 +1321,7 @@ if (
   !Yandex::Tools::defined_cmdline_param('debug') &&
   !$i_am_watchdog &&
   !Yandex::Tools::defined_cmdline_param('show-jobs') &&
+  !Yandex::Tools::defined_cmdline_param('show-job') &&
   !Yandex::Tools::defined_cmdline_param('enable-jobs') &&
   !Yandex::Tools::defined_cmdline_param('disable-jobs') &&
   !Yandex::Tools::defined_cmdline_param('add-job') &&
@@ -1618,7 +1339,7 @@ if (
 if (!get_cfg_path()) {
   die "no configuration found (try creating /etc/snaked)";
 }
-refreshOptions($ENV{'PS_SNAKED_CFG'}, {'no-jobs' => $i_am_watchdog});
+snaked::refreshOptions($ENV{'PS_SNAKED_CFG'}, {'no-jobs' => $i_am_watchdog});
 
 if (Yandex::Tools::defined_cmdline_param('show-jobs')) {
   print "    global options\n";
@@ -1640,6 +1361,33 @@ if (Yandex::Tools::defined_cmdline_param('show-jobs')) {
       }
       print "\n";
     }
+  }
+  exit 0;
+}
+if (Yandex::Tools::defined_cmdline_param('show-job')) {
+  my $job_name = Yandex::Tools::get_cmdline_param('show-job');
+  my $params = Yandex::Tools::get_cmdline_param();
+
+  if (!$snaked::Daemon::runtime->{'tasks'}->{$job_name}) {
+    print "undefined job: $job_name\n";
+    exit 0;
+  }
+
+  my $job = $snaked::Daemon::runtime->{'tasks'}->{$job_name};
+  foreach my $o (sort keys %{$job}) {
+    # skip invalid params
+    if (scalar(keys %{$params}) > 1 && !$params->{$o}) {
+      next;
+    }
+
+    print "$o: ";
+    if (ref($job->{$o}) eq 'ARRAY') {
+      print join(",", @{$job->{$o}});
+    }
+    else {
+      print $job->{$o};
+    }
+    print "\n";
   }
   exit 0;
 }
@@ -1708,17 +1456,22 @@ elsif (Yandex::Tools::defined_cmdline_param('add-job')) {
     exit 1;
   }
 
-  my %params = (
+  my $param_values = {};
+
+  my $mandatory_params = {
     'admin_email' => 1,
     'cmd' => 1,
     'execution_interval' => 1,
     'execution_timeout' => 1,
     'notification_interval' => 1,
-  );
+    };
+  my $optional_params = {
+    'conflicts' => 1,
+    };
 
   my @err = ();
 
-  foreach my $k (keys %params) {
+  foreach my $k (keys %{$mandatory_params}) {
     unless (Yandex::Tools::defined_cmdline_param($k)) {
       push(@err, "mandatory parameter [$k] is missing");
       next;
@@ -1728,7 +1481,13 @@ elsif (Yandex::Tools::defined_cmdline_param('add-job')) {
       push(@err, "missing value for mandatory parameter [$k]");
       next;
     }
-    $params{$k} = $v;
+    $param_values->{$k} = $v;
+  }
+  foreach my $k (keys %{$optional_params}) {
+    my $v = Yandex::Tools::get_cmdline_param($k);
+    if ($v) {
+      $param_values->{$k} = $v;
+    }
   }
 
   if (@err) {
@@ -1737,6 +1496,7 @@ elsif (Yandex::Tools::defined_cmdline_param('add-job')) {
     }
     exit 1;
   }
+
 
   my $jobs_dir = $ENV{'PS_SNAKED_CFG'} . '/jobs';
 
@@ -1751,8 +1511,8 @@ elsif (Yandex::Tools::defined_cmdline_param('add-job')) {
   # snaked would not read incomplete job definition
   Yandex::Tools::write_file_option("$jobs_dir/$job_name/disabled");
 
-  foreach my $k (keys %params) {
-    Yandex::Tools::write_file_option("$jobs_dir/$job_name/$k", $params{$k});
+  foreach my $k (keys %{$param_values}) {
+    Yandex::Tools::write_file_option("$jobs_dir/$job_name/$k", $param_values->{$k});
   }
 
   chmod(0755, "$jobs_dir/$job_name/cmd");
@@ -1824,6 +1584,7 @@ elsif (Yandex::Tools::defined_cmdline_param('modify-job')) {
     'execution_interval' => 1,
     'execution_timeout' => 1,
     'notification_interval' => 1,
+    'disabled' => 1,
   );
 
   my %update = ();
@@ -1852,6 +1613,9 @@ elsif (Yandex::Tools::defined_cmdline_param('modify-job')) {
   }
 
   my $disabled = (-f "$jobs_dir/$job_name/disabled") ? 1 : 0;
+  if (defined($update{'disabled'})) {
+    $disabled = $update{'disabled'};
+  }
 
   # Temporary disable job to be sure that
   # snaked would not read incomplete job definition
@@ -1964,7 +1728,7 @@ while (1) {
   debug_main_cycle("001");
   
   $previous_clock = $now_clock;
-  $now_clock = my_clock();
+  $now_clock = snaked::my_clock();
 
   if ($previous_clock && $now_clock) {
     my $adjustment = clock_adjusted($now_clock, {
@@ -2007,7 +1771,7 @@ while (1) {
   foreach my $v (values %{$snaked::Daemon::runtime->{'children'}->{'by_pid'}}) {
     
     # minimize gettime calls a bit
-    my $now_mono = clock_mono();
+    my $now_mono = snaked::clock_mono();
 
     # check for really long running processes
     # and kill them brutally (not very fast
@@ -2022,7 +1786,7 @@ while (1) {
       # checks whether manager is alive and terminates if not,
       # so killing manager notifies child that it should stop.
       kill(9, $v->{'pid'});
-      $v->{'killtime'} = clock_mono();
+      $v->{'killtime'} = snaked::clock_mono();
 
       do_err_log("killed long running (". ($now_mono - $v->{'borntime'}) .
         " seconds) process [$v->{'pid'}] [$v->{'name'}]", {"stderr" => 1});
@@ -2049,7 +1813,7 @@ while (1) {
     if ($snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'}) {
       Yandex::Tools::do_log("requested to reread configuration, rereading");
     }
-    refreshOptions($ENV{'PS_SNAKED_CFG'});
+    snaked::refreshOptions($ENV{'PS_SNAKED_CFG'});
     $snaked::Daemon::runtime->{'flags'}->{'refresh_configuration'} = 0;
     $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = 1000000 * 60;
   }
@@ -2066,7 +1830,7 @@ while (1) {
     }
   }
   if ($snaked::Daemon::runtime->{'flags'}->{'detailed_status'}) {
-    my $res = write_spool($$ . "_" . clock_mono() . "_status", Data::Dumper::Dumper($snaked::Daemon::runtime));
+    my $res = write_spool($$ . "_" . snaked::clock_mono() . "_status", Data::Dumper::Dumper($snaked::Daemon::runtime));
     if ($res && $res->{'ok'}) {
       Yandex::Tools::do_log("[$$] saved detailed status to [$res->{'full_pathname'}]");
     }
@@ -2081,7 +1845,14 @@ while (1) {
 
   # do processing if we were not requested to stop
   unless ($snaked::Daemon::runtime->{'flags'}->{'stop'}) {
-    run_scheduling();
+
+    # do not run scheduling (spawn new childs) before
+    # the timeout expires. timeout is set in case
+    # of failure during fork.
+    #
+    if ($snaked::Daemon::runtime->{'usec_2wait_before_fork'} < 1) {
+      run_scheduling();
+    }
   }
   else {
     # wait for children to exit and exit then
@@ -2134,6 +1905,7 @@ while (1) {
   my $slept = my_usleep($usec_to_sleep);
   $snaked::Daemon::runtime->{'usec_2check_watchdog'} = $snaked::Daemon::runtime->{'usec_2check_watchdog'} - $slept;
   $snaked::Daemon::runtime->{'usec_2refresh_configuration'} = $snaked::Daemon::runtime->{'usec_2refresh_configuration'} - $slept;
+  $snaked::Daemon::runtime->{'usec_2wait_before_fork'} = $snaked::Daemon::runtime->{'usec_2wait_before_fork'} - $slept;
 
   debug_main_cycle("007");
 }
